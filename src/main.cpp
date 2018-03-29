@@ -19,7 +19,8 @@ using json = nlohmann::json;
 const double default_target_speed = 49.5; // mph
 const int num_lanes = 3;
 const double lane_width = 4; // meter
-const double obstacle_detection_buffer = 30; // meter
+const double obstacle_detection_buffer_ahead = 15; // meter
+const double obstacle_detection_buffer_behind = 5; // meter
 
 // This value == `0.5 / 2.236936`. I don't think this calculation is meaningful. But it works.
 const double default_accel = .224; // meter/sec/sec
@@ -31,7 +32,7 @@ const double output_path_duration = 1; // sec
 const int num_output_path_points = ceil(output_path_duration / path_interval);
 
 
-enum Mode {BREAK_FREE, FOLLOW_OBSTACLE, PLAN_LANE_CHANGE, CHANGE_LANE};
+enum Mode {KEEP_LANE, PLAN_LANE_CHANGE};
 
 
 // For converting back and forth between radians and degrees.
@@ -53,107 +54,6 @@ string hasData(string s) {
   }
   return "";
 }
-
-// double distance(double x1, double y1, double x2, double y2)
-// {
-// 	return sqrt((x2-x1)*(x2-x1)+(y2-y1)*(y2-y1));
-// }
-// int ClosestWaypoint(double x, double y, const vector<double> &maps_x, const vector<double> &maps_y)
-// {
-
-// 	double closestLen = 100000; //large number
-// 	int closestWaypoint = 0;
-
-// 	for(int i = 0; i < maps_x.size(); i++)
-// 	{
-// 		double map_x = maps_x[i];
-// 		double map_y = maps_y[i];
-// 		double dist = distance(x,y,map_x,map_y);
-// 		if(dist < closestLen)
-// 		{
-// 			closestLen = dist;
-// 			closestWaypoint = i;
-// 		}
-
-// 	}
-
-// 	return closestWaypoint;
-
-// }
-
-// int NextWaypoint(double x, double y, double theta, const vector<double> &maps_x, const vector<double> &maps_y)
-// {
-
-// 	int closestWaypoint = ClosestWaypoint(x,y,maps_x,maps_y);
-
-// 	double map_x = maps_x[closestWaypoint];
-// 	double map_y = maps_y[closestWaypoint];
-
-// 	double heading = atan2((map_y-y),(map_x-x));
-
-// 	double angle = fabs(theta-heading);
-//   angle = min(2*pi() - angle, angle);
-
-//   if(angle > pi()/4)
-//   {
-//     closestWaypoint++;
-//   if (closestWaypoint == maps_x.size())
-//   {
-//     closestWaypoint = 0;
-//   }
-//   }
-
-//   return closestWaypoint;
-// }
-
-// // Transform from Cartesian x,y coordinates to Frenet s,d coordinates
-// vector<double> getFrenet(double x, double y, double theta, const vector<double> &maps_x, const vector<double> &maps_y)
-// {
-// 	int next_wp = NextWaypoint(x,y, theta, maps_x,maps_y);
-
-// 	int prev_wp;
-// 	prev_wp = next_wp-1;
-// 	if(next_wp == 0)
-// 	{
-// 		prev_wp  = maps_x.size()-1;
-// 	}
-
-// 	double n_x = maps_x[next_wp]-maps_x[prev_wp];
-// 	double n_y = maps_y[next_wp]-maps_y[prev_wp];
-// 	double x_x = x - maps_x[prev_wp];
-// 	double x_y = y - maps_y[prev_wp];
-
-// 	// find the projection of x onto n
-// 	double proj_norm = (x_x*n_x+x_y*n_y)/(n_x*n_x+n_y*n_y);
-// 	double proj_x = proj_norm*n_x;
-// 	double proj_y = proj_norm*n_y;
-
-// 	double frenet_d = distance(x_x,x_y,proj_x,proj_y);
-
-// 	//see if d value is positive or negative by comparing it to a center point
-
-// 	double center_x = 1000-maps_x[prev_wp];
-// 	double center_y = 2000-maps_y[prev_wp];
-// 	double centerToPos = distance(center_x,center_y,x_x,x_y);
-// 	double centerToRef = distance(center_x,center_y,proj_x,proj_y);
-
-// 	if(centerToPos <= centerToRef)
-// 	{
-// 		frenet_d *= -1;
-// 	}
-
-// 	// calculate s value
-// 	double frenet_s = 0;
-// 	for(int i = 0; i < prev_wp; i++)
-// 	{
-// 		frenet_s += distance(maps_x[i],maps_y[i],maps_x[i+1],maps_y[i+1]);
-// 	}
-
-// 	frenet_s += distance(0,0,proj_x,proj_y);
-
-// 	return {frenet_s,frenet_d};
-
-// }
 
 // Transform from Frenet s,d coordinates to Cartesian x,y
 vector<double> getXY(double s, double d, const vector<double> &maps_s, const vector<double> &maps_x, const vector<double> &maps_y)
@@ -183,16 +83,12 @@ vector<double> getXY(double s, double d, const vector<double> &maps_s, const vec
 
 }
 
-int lane_d_to_index(double d) {
-  return floor(d / lane_width);
-}
-
 double lane_index_to_d(int lane_index) {
   return lane_width / 2 + lane_width * lane_index;
 }
 
 /**
-  * Returns indexes of {
+  * Returns obstacle indexes of {
   *   lane 0 ahead, lane 1 ahead, lane 2 ahead,
   *   lane 0 behind, lane 1 behind, lane 2 behind
   * }
@@ -211,26 +107,26 @@ vector<int> find_closest_obstacles(const vector<vector<double> > & obstacles, do
     double d = obstacle[6];
     double s = obstacle[5];
 
-    vector<int> relevant_lane_inds;
+    vector<int> relevant_lanes;
     if (d < lane_width + d_buffer) {
-      relevant_lane_inds.push_back(0);
+      relevant_lanes.push_back(0);
     }
     if (lane_width - d_buffer < d && d < lane_width * 2 + d_buffer) {
-      relevant_lane_inds.push_back(1);
+      relevant_lanes.push_back(1);
     }
     if (lane_width * 2 - d_buffer < d) {
-      relevant_lane_inds.push_back(2);
+      relevant_lanes.push_back(2);
     }
 
-    for(unsigned int i = 0; i < relevant_lane_inds.size(); i++) {
-      int lane_ind = relevant_lane_inds[i];
+    for(unsigned int i = 0; i < relevant_lanes.size(); i++) {
+      int lane = relevant_lanes[i];
 
-      if (s > ref_s && s < closest_s_ahead[lane_ind]) {
-        closest_s_ahead[lane_ind] = s;
-        obstacle_inds[lane_ind] = obstacle_ind;
-      } else if (s < ref_s && s > closest_s_behind[lane_ind]) {
-        closest_s_behind[lane_ind] = s;
-        obstacle_inds[lane_ind + num_lanes] = obstacle_ind;
+      if (s > ref_s && s < closest_s_ahead[lane]) {
+        closest_s_ahead[lane] = s;
+        obstacle_inds[lane] = obstacle_ind;
+      } else if (s < ref_s && s > closest_s_behind[lane]) {
+        closest_s_behind[lane] = s;
+        obstacle_inds[lane + num_lanes] = obstacle_ind;
       }
     }
   }
@@ -248,7 +144,9 @@ double extract_obstacle_position(const vector<double> & obstacle) {
   return obstacle[5];
 }
 
-int main() {
+int main(int argc, char* argv[]) {
+  bool debug = argc >= 2 && strcmp(argv[1], "--debug");
+
   uWS::Hub h;
 
   // Load up map values for waypoint's x,y,s and d normalized normal vectors
@@ -285,22 +183,25 @@ int main() {
   	map_waypoints_dy.push_back(d_y);
   }
 
-  Mode mode = BREAK_FREE;
+  Mode mode = KEEP_LANE;
   double target_speed = default_target_speed;
+  int current_lane = 1;
   double end_path_speed = 0; // Telemetry doesn't provide this, so remember.
-  int target_lane_ind = 1;
 
   h.onMessage(
-    [&mode, &target_speed, &end_path_speed, &target_lane_ind,
-    &map_waypoints_x,&map_waypoints_y,&map_waypoints_s,&map_waypoints_dx,&map_waypoints_dy
-    ]
+    [&mode, &target_speed, &current_lane,     // three states of FSM
+      &end_path_speed,                        // non-provided telemetry value
+      &map_waypoints_x,&map_waypoints_y,&map_waypoints_s,
+      &debug]
     (uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length,
                      uWS::OpCode opCode) {
+
+    //auto sdata = string(data).substr(0, length);
+    //cout << sdata << endl;
+
     // "42" at the start of the message means there's a websocket message event.
     // The 4 signifies a websocket message
     // The 2 signifies a websocket event
-    //auto sdata = string(data).substr(0, length);
-    //cout << sdata << endl;
     if (length && length > 2 && data[0] == '4' && data[1] == '2') {
 
       auto s = hasData(data);
@@ -343,39 +244,140 @@ int main() {
 
           vector<int> obstacle_inds = find_closest_obstacles(obstacles, end_path_s);
 
-          if (mode == BREAK_FREE) {
-            if (obstacle_inds[target_lane_ind] == -1) {
+          if (mode == PLAN_LANE_CHANGE) {
+            vector<int> considered_adjacent_lanes; // in the order of preference
+            if (current_lane == 0 || current_lane == 2) {
+              considered_adjacent_lanes = {1};
+            } else if (current_lane == 1) {
+              considered_adjacent_lanes = {0, 2};
+            }
+
+            for (unsigned int temp = 0; temp < considered_adjacent_lanes.size(); temp++) {
+              int adj_lane = considered_adjacent_lanes[temp];
+              if (debug) {
+                cout << "adj_lane " << adj_lane << endl;
+              }
+
+              int obstacle_ind_ahead = obstacle_inds[adj_lane];
+              int obstacle_ind_behind = obstacle_inds[adj_lane + num_lanes];
+
+              // No one ahead or behind in the adjacent lane. Execute lane change.
+              if (obstacle_ind_ahead == -1 && obstacle_ind_behind == -1) {
+                target_speed = default_target_speed;
+                current_lane = adj_lane;
+                mode = KEEP_LANE;
+                break;
+              }
+
+              // Just extracting data. No decision made in this block.
+              vector<double> obstacle_behind;
+              double speed_behind, pos_behind;
+              if (obstacle_ind_behind != -1) {
+                obstacle_behind = obstacles[obstacle_ind_behind];
+                speed_behind = extract_obstacle_speed(obstacle_behind);
+                pos_behind = extract_obstacle_position(obstacle_behind) + speed_behind * prev_path_duration;
+
+                if (debug) {
+                  cout << "behind " << target_speed << ' ' << speed_behind << ' ' << end_path_s << ' ' << pos_behind <<  endl;
+                }
+              }
+
+              // No one ahead. By logic, there is someone behind.
+              if (obstacle_ind_ahead == -1) {
+                if (debug) {
+                  cout << "^ no, v yes\n";
+                  cout << (speed_behind < target_speed) << " v is slow\n";
+                  cout << (pos_behind < end_path_s - obstacle_detection_buffer_behind) << " v is far\n";
+                }
+
+                // The obstacle behind is slower than self's current speed. Execute lane change.
+                if (speed_behind < target_speed &&
+                    pos_behind < end_path_s - obstacle_detection_buffer_behind) {
+                  target_speed = default_target_speed;
+                  current_lane = adj_lane;
+                  mode = KEEP_LANE;
+                }
+                // Whether executing or not, no need to evaluate this lane further.
+                continue;
+              }
+
+              // By logic, there is someone ahead.
+              vector<double> obstacle_ahead = obstacles[obstacle_ind_ahead];
+              double speed_ahead = extract_obstacle_speed(obstacle_ahead);
+              double pos_ahead = extract_obstacle_position(obstacle_ahead) + speed_ahead * prev_path_duration;
+
+              if (debug) {
+                cout << "ahead " << target_speed << ' ' << speed_ahead << ' ' << end_path_s << ' ' << pos_ahead <<  endl;
+                if (obstacle_ind_behind == -1) {
+                  cout << "^ yes, v no\n";
+                } else {
+                  cout << "^ yes, v yes\n";
+                }
+                cout << (speed_ahead > target_speed) << " ^ is fast\n";
+                cout << (pos_ahead > end_path_s + obstacle_detection_buffer_ahead) << " ^ is far\n";
+                if (obstacle_ind_behind != -1) {
+                  cout << (speed_behind < target_speed) << " v is slow\n";
+                  cout << (pos_behind < end_path_s - obstacle_detection_buffer_behind) << " v is far\n";
+                }
+              }
+
+              if (speed_ahead > target_speed &&
+                  pos_ahead > end_path_s + obstacle_detection_buffer_ahead &&
+                  (
+                    obstacle_ind_behind == -1 ||
+                    (
+                      speed_behind < target_speed &&
+                      pos_behind < end_path_s - obstacle_detection_buffer_behind
+                    )
+                  )) {
+                target_speed = speed_ahead;
+                current_lane = adj_lane;
+                mode = KEEP_LANE;
+                break;
+              }
+
+              // Try other lanes. Do not `break` here.
+            }
+          }
+
+          // TODO restore the if condition?
+          // else if (mode == KEEP_LANE) {
+            if (obstacle_inds[current_lane] == -1) {
               target_speed = default_target_speed;
             } else {
-              vector<double> obstacle = obstacles[obstacle_inds[target_lane_ind]];
+              vector<double> obstacle = obstacles[obstacle_inds[current_lane]];
+
+              // double obs_speed, future_separation;
+              // estimate_obstacle_metrics(obstacle, prev_path_duration, end_path_s,
+              //   obs_speed, future_separation);
 
               double obs_speed = extract_obstacle_speed(obstacle);
-              double obs_pos = extract_obstacle_position(obstacle); // in s direction
+              double obs_curr_pos = extract_obstacle_position(obstacle);
 
               // Assuming the obstacle keeps the same speed, it will be here by
               // the time the self car gets to the end of the previous path.
-              double obs_future_pos = obs_pos + obs_speed * prev_path_duration;
-              double future_separation = obs_future_pos - end_path_s;
+              // double obs_future_pos = obs_curr_pos + obs_speed * prev_path_duration;
 
-              if (future_separation < obstacle_detection_buffer) {
+              // if (obs_pos < end_path_s + obstacle_detection_buffer_ahead) {
+              if (obs_curr_pos - obstacle_detection_buffer_ahead < end_path_s) {
                 target_speed = obs_speed;
+                mode = PLAN_LANE_CHANGE;
               } else {
                 target_speed = default_target_speed;
               }
             }
+          // }
 
-            // We're using the same velocity for all added path points.
-            if (end_path_speed < target_speed) {
-              end_path_speed += default_accel;
-            } else {
-              end_path_speed -= default_accel;
-            }
-          } else if (mode == FOLLOW_OBSTACLE) {
+          // For all modes, adjust acceleration only.
+          // We're using the same speed for all path points to be added.
+          if (end_path_speed < target_speed) {
+            end_path_speed += default_accel;
+          } else {
+            end_path_speed -= default_accel;
+          }
 
-          } else if (mode == PLAN_LANE_CHANGE) {
-
-          } else if (mode == CHANGE_LANE) {
-
+          if (debug) {
+            cout << "mode current_lane target_speed  " << mode << ' ' << current_lane << ' ' << target_speed << endl;
           }
 
           ////// Begin path generation //////
@@ -420,7 +422,7 @@ int main() {
 
             vector<double> marker_xy = getXY(
               end_path_s + future_s_offset,
-              lane_index_to_d(target_lane_ind),
+              lane_index_to_d(current_lane),
               map_waypoints_s, map_waypoints_x, map_waypoints_y);
 
             markers_x.push_back(marker_xy[0]);
