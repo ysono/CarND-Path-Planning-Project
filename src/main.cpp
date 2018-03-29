@@ -15,6 +15,25 @@ using namespace std;
 // for convenience
 using json = nlohmann::json;
 
+
+const double default_target_speed = 49.5; // mph
+const int num_lanes = 3;
+const double lane_width = 4; // meter
+const double obstacle_detection_buffer = 30; // meter
+
+// This value == `0.5 / 2.236936`. I don't think this calculation is meaningful. But it works.
+const double default_accel = .224; // meter/sec/sec
+
+const double mps_to_mph = 2.236936; // 1 meter/sec equals this much mile/hour
+
+const double path_interval = 0.02; // sec
+const double output_path_duration = 1; // sec
+const int num_output_path_points = ceil(output_path_duration / path_interval);
+
+
+enum Mode {BREAK_FREE, FOLLOW_OBSTACLE, PLAN_LANE_CHANGE, CHANGE_LANE};
+
+
 // For converting back and forth between radians and degrees.
 constexpr double pi() { return M_PI; }
 double deg2rad(double x) { return x * pi() / 180; }
@@ -35,106 +54,106 @@ string hasData(string s) {
   return "";
 }
 
-double distance(double x1, double y1, double x2, double y2)
-{
-	return sqrt((x2-x1)*(x2-x1)+(y2-y1)*(y2-y1));
-}
-int ClosestWaypoint(double x, double y, const vector<double> &maps_x, const vector<double> &maps_y)
-{
+// double distance(double x1, double y1, double x2, double y2)
+// {
+// 	return sqrt((x2-x1)*(x2-x1)+(y2-y1)*(y2-y1));
+// }
+// int ClosestWaypoint(double x, double y, const vector<double> &maps_x, const vector<double> &maps_y)
+// {
 
-	double closestLen = 100000; //large number
-	int closestWaypoint = 0;
+// 	double closestLen = 100000; //large number
+// 	int closestWaypoint = 0;
 
-	for(int i = 0; i < maps_x.size(); i++)
-	{
-		double map_x = maps_x[i];
-		double map_y = maps_y[i];
-		double dist = distance(x,y,map_x,map_y);
-		if(dist < closestLen)
-		{
-			closestLen = dist;
-			closestWaypoint = i;
-		}
+// 	for(int i = 0; i < maps_x.size(); i++)
+// 	{
+// 		double map_x = maps_x[i];
+// 		double map_y = maps_y[i];
+// 		double dist = distance(x,y,map_x,map_y);
+// 		if(dist < closestLen)
+// 		{
+// 			closestLen = dist;
+// 			closestWaypoint = i;
+// 		}
 
-	}
+// 	}
 
-	return closestWaypoint;
+// 	return closestWaypoint;
 
-}
+// }
 
-int NextWaypoint(double x, double y, double theta, const vector<double> &maps_x, const vector<double> &maps_y)
-{
+// int NextWaypoint(double x, double y, double theta, const vector<double> &maps_x, const vector<double> &maps_y)
+// {
 
-	int closestWaypoint = ClosestWaypoint(x,y,maps_x,maps_y);
+// 	int closestWaypoint = ClosestWaypoint(x,y,maps_x,maps_y);
 
-	double map_x = maps_x[closestWaypoint];
-	double map_y = maps_y[closestWaypoint];
+// 	double map_x = maps_x[closestWaypoint];
+// 	double map_y = maps_y[closestWaypoint];
 
-	double heading = atan2((map_y-y),(map_x-x));
+// 	double heading = atan2((map_y-y),(map_x-x));
 
-	double angle = fabs(theta-heading);
-  angle = min(2*pi() - angle, angle);
+// 	double angle = fabs(theta-heading);
+//   angle = min(2*pi() - angle, angle);
 
-  if(angle > pi()/4)
-  {
-    closestWaypoint++;
-  if (closestWaypoint == maps_x.size())
-  {
-    closestWaypoint = 0;
-  }
-  }
+//   if(angle > pi()/4)
+//   {
+//     closestWaypoint++;
+//   if (closestWaypoint == maps_x.size())
+//   {
+//     closestWaypoint = 0;
+//   }
+//   }
 
-  return closestWaypoint;
-}
+//   return closestWaypoint;
+// }
 
-// Transform from Cartesian x,y coordinates to Frenet s,d coordinates
-vector<double> getFrenet(double x, double y, double theta, const vector<double> &maps_x, const vector<double> &maps_y)
-{
-	int next_wp = NextWaypoint(x,y, theta, maps_x,maps_y);
+// // Transform from Cartesian x,y coordinates to Frenet s,d coordinates
+// vector<double> getFrenet(double x, double y, double theta, const vector<double> &maps_x, const vector<double> &maps_y)
+// {
+// 	int next_wp = NextWaypoint(x,y, theta, maps_x,maps_y);
 
-	int prev_wp;
-	prev_wp = next_wp-1;
-	if(next_wp == 0)
-	{
-		prev_wp  = maps_x.size()-1;
-	}
+// 	int prev_wp;
+// 	prev_wp = next_wp-1;
+// 	if(next_wp == 0)
+// 	{
+// 		prev_wp  = maps_x.size()-1;
+// 	}
 
-	double n_x = maps_x[next_wp]-maps_x[prev_wp];
-	double n_y = maps_y[next_wp]-maps_y[prev_wp];
-	double x_x = x - maps_x[prev_wp];
-	double x_y = y - maps_y[prev_wp];
+// 	double n_x = maps_x[next_wp]-maps_x[prev_wp];
+// 	double n_y = maps_y[next_wp]-maps_y[prev_wp];
+// 	double x_x = x - maps_x[prev_wp];
+// 	double x_y = y - maps_y[prev_wp];
 
-	// find the projection of x onto n
-	double proj_norm = (x_x*n_x+x_y*n_y)/(n_x*n_x+n_y*n_y);
-	double proj_x = proj_norm*n_x;
-	double proj_y = proj_norm*n_y;
+// 	// find the projection of x onto n
+// 	double proj_norm = (x_x*n_x+x_y*n_y)/(n_x*n_x+n_y*n_y);
+// 	double proj_x = proj_norm*n_x;
+// 	double proj_y = proj_norm*n_y;
 
-	double frenet_d = distance(x_x,x_y,proj_x,proj_y);
+// 	double frenet_d = distance(x_x,x_y,proj_x,proj_y);
 
-	//see if d value is positive or negative by comparing it to a center point
+// 	//see if d value is positive or negative by comparing it to a center point
 
-	double center_x = 1000-maps_x[prev_wp];
-	double center_y = 2000-maps_y[prev_wp];
-	double centerToPos = distance(center_x,center_y,x_x,x_y);
-	double centerToRef = distance(center_x,center_y,proj_x,proj_y);
+// 	double center_x = 1000-maps_x[prev_wp];
+// 	double center_y = 2000-maps_y[prev_wp];
+// 	double centerToPos = distance(center_x,center_y,x_x,x_y);
+// 	double centerToRef = distance(center_x,center_y,proj_x,proj_y);
 
-	if(centerToPos <= centerToRef)
-	{
-		frenet_d *= -1;
-	}
+// 	if(centerToPos <= centerToRef)
+// 	{
+// 		frenet_d *= -1;
+// 	}
 
-	// calculate s value
-	double frenet_s = 0;
-	for(int i = 0; i < prev_wp; i++)
-	{
-		frenet_s += distance(maps_x[i],maps_y[i],maps_x[i+1],maps_y[i+1]);
-	}
+// 	// calculate s value
+// 	double frenet_s = 0;
+// 	for(int i = 0; i < prev_wp; i++)
+// 	{
+// 		frenet_s += distance(maps_x[i],maps_y[i],maps_x[i+1],maps_y[i+1]);
+// 	}
 
-	frenet_s += distance(0,0,proj_x,proj_y);
+// 	frenet_s += distance(0,0,proj_x,proj_y);
 
-	return {frenet_s,frenet_d};
+// 	return {frenet_s,frenet_d};
 
-}
+// }
 
 // Transform from Frenet s,d coordinates to Cartesian x,y
 vector<double> getXY(double s, double d, const vector<double> &maps_s, const vector<double> &maps_x, const vector<double> &maps_y)
@@ -164,15 +183,12 @@ vector<double> getXY(double s, double d, const vector<double> &maps_s, const vec
 
 }
 
-//////////////////
-// TODO consts here
-int num_lanes = 3;
-double lane_width = 4; // meter
-double obstacle_detection_delta_s = 30; // meter
-//////////////////
-
 int lane_d_to_index(double d) {
   return floor(d / lane_width);
+}
+
+double lane_index_to_d(int lane_index) {
+  return lane_width / 2 + lane_width * lane_index;
 }
 
 /**
@@ -222,6 +238,16 @@ vector<int> find_closest_obstacles(const vector<vector<double> > & obstacles, do
   return obstacle_inds;
 }
 
+double extract_obstacle_speed(const vector<double> & obstacle) {
+  double vx = obstacle[3];
+  double vy = obstacle[4];
+  return sqrt(pow(vx, 2) + pow(vy, 2));
+}
+
+double extract_obstacle_position(const vector<double> & obstacle) {
+  return obstacle[5];
+}
+
 int main() {
   uWS::Hub h;
 
@@ -259,11 +285,13 @@ int main() {
   	map_waypoints_dy.push_back(d_y);
   }
 
+  Mode mode = BREAK_FREE;
+  double target_speed = default_target_speed;
+  double end_path_speed = 0; // Telemetry doesn't provide this, so remember.
   int target_lane_ind = 1;
-  double end_path_speed = 0;
 
   h.onMessage(
-    [&end_path_speed, &target_lane_ind,
+    [&mode, &target_speed, &end_path_speed, &target_lane_ind,
     &map_waypoints_x,&map_waypoints_y,&map_waypoints_s,&map_waypoints_dx,&map_waypoints_dy
     ]
     (uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length,
@@ -289,9 +317,9 @@ int main() {
         	double car_x = j[1]["x"];
         	double car_y = j[1]["y"];
         	double car_s = j[1]["s"];
-        	double car_d = j[1]["d"];
-        	double car_yaw = j[1]["yaw"];
-        	double car_speed = j[1]["speed"];
+        	// double car_d = j[1]["d"]; // not used
+        	double car_yaw = j[1]["yaw"]; car_yaw = deg2rad(car_yaw); // deg
+        	// double car_speed = j[1]["speed"]; // not used
 
         	// Previous path data given to the Planner
         	auto previous_path_x = j[1]["previous_path_x"];
@@ -300,175 +328,163 @@ int main() {
 
         	// Previous path's end s and d values 
         	double end_path_s = j[1]["end_path_s"];
-        	double end_path_d = j[1]["end_path_d"];
+        	// double end_path_d = j[1]["end_path_d"]; // not used
 
         	// Sensor Fusion Data, a list of all other cars on the same side of the road.
         	vector<vector<double> > obstacles = j[1]["sensor_fusion"];
 
-          ///////////////////////////
+          ////// Begin finite state machine logic //////
 
-          // TODO consts here
-
-          // double lane_width = 4; // meter
-          // double obstacle_detection_delta_s = 30; // meter
-
-          // == `0.5 / 2.236936`. I don't think this calculation is meaningful. But it works.
-          double default_accel = .224; // meter/sec/sec
-
-          double mps_to_mph = 2.236936; // 1 meter/sec equals this much mile/hour
-
-          double path_interval = 0.02; // sec
-          
-          ///////////////////////////
-
-          // set car_s and car_d to the end of the existing path
-          if (previous_path_size > 0) {
-            car_s = end_path_s;
-            car_d = end_path_d;
+          if (previous_path_size == 0) {
+            end_path_s = car_s;
           }
 
-          bool too_close = false;
+          double prev_path_duration = path_interval * previous_path_size;
 
+          vector<int> obstacle_inds = find_closest_obstacles(obstacles, end_path_s);
 
-          vector<int> obstacle_inds = find_closest_obstacles(obstacles, car_s);
+          if (mode == BREAK_FREE) {
+            if (obstacle_inds[target_lane_ind] == -1) {
+              target_speed = default_target_speed;
+            } else {
+              vector<double> obstacle = obstacles[obstacle_inds[target_lane_ind]];
 
-          if (obstacle_inds[target_lane_ind] != -1) {
-            vector<double> obstacle = obstacles[obstacle_inds[target_lane_ind]];
+              double obs_speed = extract_obstacle_speed(obstacle);
+              double obs_pos = extract_obstacle_position(obstacle); // in s direction
 
-            double vx = obstacle[3];
-            double vy = obstacle[4];
-            double obstacle_speed = sqrt(pow(vx, 2) + pow(vy, 2));
-            double obstacle_pos_s = obstacle[5];
+              // Assuming the obstacle keeps the same speed, it will be here by
+              // the time the self car gets to the end of the previous path.
+              double obs_future_pos = obs_pos + obs_speed * prev_path_duration;
+              double future_separation = obs_future_pos - end_path_s;
 
-            // Assuming obstacle keeps the same speed, it will be here by the time
-            // self get here.
-            double obstacle_future_pos_s =
-              obstacle_pos_s + (double) previous_path_size * path_interval * obstacle_speed;
-
-            if (obstacle_future_pos_s - car_s < obstacle_detection_delta_s) {
-              too_close = true;
-
-              // target_lane_ind -= 1; // TODO remove
-              if (end_path_speed > obstacle_speed) {
-                end_path_speed -= default_accel; 
+              if (future_separation < obstacle_detection_buffer) {
+                target_speed = obs_speed;
+              } else {
+                target_speed = default_target_speed;
               }
             }
+
+            // We're using the same velocity for all added path points.
+            if (end_path_speed < target_speed) {
+              end_path_speed += default_accel;
+            } else {
+              end_path_speed -= default_accel;
+            }
+          } else if (mode == FOLLOW_OBSTACLE) {
+
+          } else if (mode == PLAN_LANE_CHANGE) {
+
+          } else if (mode == CHANGE_LANE) {
+
           }
 
+          ////// Begin path generation //////
 
-          // change velocity for all points output in this iteration
-          // further optimization todo would change velocity within points output in this iteration
-          // another problem is when there is an obstacle, the target never stabliizes at obstacle's speed but instead fluctuates lte that speed.
-          if (too_close) {
-          } else if (end_path_speed < 49.5) {
-            end_path_speed += default_accel;
-          }
+          // Markers for spline. Spline will go through all points defined here.
+          vector<double> markers_x, markers_y;
 
-          ///---
-
-          // what i call markers. first they're in x,d. these will be transformed to p,q; then fed into spline.
-          vector<double> ptsx, ptsy;
-
-          // these refs contain info for the starting point of additional path generation
-          // ie they're based on 2 previous points.
-          double ref_x, ref_y, ref_yaw;
+          double end_path_x, end_path_y, end_path_yaw;
 
           // add 2 previous points to markers
           if (previous_path_size < 2) {
-            ref_x = car_x;
-            ref_y = car_y;
-            ref_yaw = deg2rad(car_yaw);
+            end_path_x = car_x;
+            end_path_y = car_y;
+            end_path_yaw = car_yaw;
 
-            ptsx.push_back(car_x - cos(car_yaw));
-            ptsy.push_back(car_y - sin(car_yaw));
-            ptsx.push_back(car_x);
-            ptsy.push_back(car_y);
+            markers_x.push_back(car_x - cos(car_yaw));
+            markers_y.push_back(car_y - sin(car_yaw));
+
+            markers_x.push_back(end_path_x);
+            markers_y.push_back(end_path_y);
           } else {
-            ref_x = previous_path_x[previous_path_size - 1];
-            ref_y = previous_path_y[previous_path_size - 1];
-            double ref_x_prev = previous_path_x[previous_path_size - 2];
-            double ref_y_prev = previous_path_y[previous_path_size - 2];
-            ref_yaw = atan2(ref_y - ref_y_prev, ref_x - ref_x_prev);
+            end_path_x = previous_path_x[previous_path_size - 1];
+            end_path_y = previous_path_y[previous_path_size - 1];
+            double penultimate_x = previous_path_x[previous_path_size - 2];
+            double penultimate_y = previous_path_y[previous_path_size - 2];
+            end_path_yaw = atan2(end_path_y - penultimate_y, end_path_x - penultimate_x);
 
-            ptsx.push_back(ref_x_prev);
-            ptsx.push_back(ref_x);
-            ptsy.push_back(ref_y_prev);
-            ptsy.push_back(ref_y);
+            markers_x.push_back(penultimate_x);
+            markers_y.push_back(penultimate_y);
+
+            markers_x.push_back(end_path_x);
+            markers_y.push_back(end_path_y);
           }
 
-          // add more markers. add sparse points. pick s,d and convert to x,y using getXY()
-          // 30 meters is far ahead enough for lane change
-          vector<double> next_wp0 = getXY(car_s + 30, 2 + 4 * target_lane_ind, map_waypoints_s, map_waypoints_x, map_waypoints_y);
-          vector<double> next_wp1 = getXY(car_s + 60, 2 + 4 * target_lane_ind, map_waypoints_s, map_waypoints_x, map_waypoints_y);
-          vector<double> next_wp2 = getXY(car_s + 90, 2 + 4 * target_lane_ind, map_waypoints_s, map_waypoints_x, map_waypoints_y);
-          ptsx.push_back(next_wp0[0]);
-          ptsx.push_back(next_wp1[0]);
-          ptsx.push_back(next_wp2[0]);
-          ptsy.push_back(next_wp0[1]);
-          ptsy.push_back(next_wp1[1]);
-          ptsy.push_back(next_wp2[1]);
+          // Add a few more sparse markers in far distance
+          // Pick the markers in s,d and convert them to x,y
+          // 30 meters is far ahead enough for a smooth lane change
+          // Add more points further away to make the tail end of the curve straight
+          vector<double> future_s_offsets{30, 60, 90};
+          for (unsigned int i = 0; i < future_s_offsets.size(); i++) {
+            double future_s_offset = future_s_offsets[i];
 
-          // transform markers to p,q in-place
-          for (int i = 0; i < ptsx.size(); i++) {
-            double shift_x = ptsx[i] - ref_x;
-            double shift_y = ptsy[i] - ref_y;
-            ptsx[i] = shift_x * cos(-ref_yaw) - shift_y * sin(-ref_yaw);
-            ptsy[i] = shift_x * sin(-ref_yaw) + shift_y * cos(-ref_yaw);
+            vector<double> marker_xy = getXY(
+              end_path_s + future_s_offset,
+              lane_index_to_d(target_lane_ind),
+              map_waypoints_s, map_waypoints_x, map_waypoints_y);
+
+            markers_x.push_back(marker_xy[0]);
+            markers_y.push_back(marker_xy[1]);
           }
 
-          tk::spline s;
-          s.set_points(ptsx, ptsy);
-
-          // these are the path points to be output
-        	vector<double> next_x_vals;
-        	vector<double> next_y_vals;
-
-          // add back all previous points
-          for (int i = 0; i < previous_path_size; i++) {
-            next_x_vals.push_back(previous_path_x[i]);
-            next_y_vals.push_back(previous_path_y[i]);
+          // Transform markers to coordinate system - which I'll call p,q - such that
+          // origin is at previous path's end
+          // and p is pointing to car's forward direction at previous path's end
+          // Reuse the same vectors
+          for (int i = 0; i < markers_x.size(); i++) {
+            double shift_x = markers_x[i] - end_path_x;
+            double shift_y = markers_y[i] - end_path_y;
+            markers_x[i] = shift_x * cos(-end_path_yaw) - shift_y * sin(-end_path_yaw);
+            markers_y[i] = shift_x * sin(-end_path_yaw) + shift_y * cos(-end_path_yaw);
           }
 
-          // add new path points
-          // first pick x interval
-          double target_x = 30; // arbitrary. this is NOT the limit of further x being added.
-          double target_y = s(target_x);
-          double target_dist = sqrt(pow(target_x, 2) + pow(target_y, 2));
-          double N = target_dist / (path_interval * end_path_speed / mps_to_mph);
-          double x_interval = target_x / N;
+          // Spline in p,q
+          tk::spline spliner_pq;
+          spliner_pq.set_points(markers_x, markers_y);
 
-          // add as many points as needed to refill 50. this 50 count limits further x to be added.
-          // generate in p,q; transform to x,y; add to next_x_vals and next_y_vals vectors.
-          for (int i = 0; i <= 50 - previous_path_size; i++) {
-            // to avoid repeating ref_x and ref_y, must use `+1`. makes a big difference!
-            double x_point = x_interval * (i + 1);
-            double y_point = s(x_point);
+          // Next path x,y. This is what we will output.
+        	vector<double> next_path_x(previous_path_size), next_path_y(previous_path_size);
 
-            double x_ref = x_point;
-            double y_ref = y_point;
+          // Add back all previous path points
+          std::copy(previous_path_x.begin(), previous_path_x.end(), next_path_x.begin());
+          std::copy(previous_path_y.begin(), previous_path_y.end(), next_path_y.begin());
 
-            // transform from p,q to x,y
-            x_point = x_ref * cos(ref_yaw) - y_ref * sin(ref_yaw);
-            y_point = x_ref * sin(ref_yaw) + y_ref * cos(ref_yaw);
-
-            x_point += ref_x;
-            y_point += ref_y;
-
-            next_x_vals.push_back(x_point);
-            next_y_vals.push_back(y_point);
+          // Add newly generated path points.
+          // First determine at what interval.
+          double p_interval;
+          {
+            // Pick a p in the future arbitrarily. It should be both far enough
+            // and close enough to linearize the curvature.
+            // s and p coordinates are close in the short distance, so simply
+            // pick from the closest future s offset.
+            double target_p = future_s_offsets[0];
+            double target_q = spliner_pq(target_p);
+            double target_dist = sqrt(pow(target_p, 2) + pow(target_q, 2));
+            double dist_per_interval = path_interval * end_path_speed / mps_to_mph; // meter
+            double N = target_dist / dist_per_interval;
+            p_interval = target_p / N;
           }
 
+          // Add as many points as needed to refill the count of output path points.
+          // Generate points in p,q; then transform to x,y
+          for (int i = 0; i <= num_output_path_points - previous_path_size; i++) {
+            
+            // To avoid repeating end_path_x and end_path_y, must use `i+1`. Makes a big difference!
+            double p = p_interval * (i + 1);
+            double q = spliner_pq(p);
 
+            double x = p * cos(end_path_yaw) - q * sin(end_path_yaw) + end_path_x;
+            double y = p * sin(end_path_yaw) + q * cos(end_path_yaw) + end_path_y;
 
+            next_path_x.push_back(x);
+            next_path_y.push_back(y);
+          }
 
+          ////// End of path generation //////
 
-
-          ///////////////////////////
-
-        	// TODO: define a path made up of (x,y) points that the car will visit sequentially every .02 seconds
           json msgJson;
-        	msgJson["next_x"] = next_x_vals;
-        	msgJson["next_y"] = next_y_vals;
+        	msgJson["next_x"] = next_path_x;
+        	msgJson["next_y"] = next_path_y;
 
         	auto msg = "42[\"control\","+ msgJson.dump()+"]";
         	ws.send(msg.data(), msg.length(), uWS::OpCode::TEXT);
