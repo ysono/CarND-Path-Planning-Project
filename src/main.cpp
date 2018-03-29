@@ -164,6 +164,55 @@ vector<double> getXY(double s, double d, const vector<double> &maps_s, const vec
 
 }
 
+//////////////////
+// TODO consts here
+double lane_width = 4; // meter
+double obstacle_detection_delta_s = 30; // meter
+//////////////////
+
+void find_closest_obstacle(const vector<vector<double> > & obstacles,
+    int target_lane_ind, double ref_s,
+    int & closest_ind_ahead, int & closest_ind_behind) { // TODO take multiple target lane inds
+  double closest_s_ahead = std::numeric_limits<double>::max();
+  double closest_s_behind = - std::numeric_limits<double>::max();
+
+  for (int i = 0; i < obstacles.size(); i++) {
+    double d_center = lane_width / 2 + lane_width * target_lane_ind;
+    // Include obstacles whose centers are up to 3/4 of a lane off the center of the target lane.
+    double d_lo = d_center - lane_width / 4 * 3;
+    double d_hi = d_center + lane_width / 4 * 3;
+
+    float d = obstacles[i][6];
+    if (d_lo < d && d < d_hi) {
+
+
+
+      // double vx = obstacles[i][3];
+      // double vy = obstacles[i][4];
+      // double obstacle_speed = sqrt(pow(vx, 2) + pow(vy, 2));
+      double s = obstacles[i][5];
+
+      if (s > ref_s && s < closest_s_ahead) {
+        closest_s_ahead = s;
+        closest_ind_ahead = i;
+      } else if (s < ref_s && s > closest_s_behind) {
+        closest_s_behind = s;
+        closest_ind_behind = i;
+      }
+
+      // s += (double) previous_path_size * 0.02 * obstacle_speed;
+
+      // // compare position of self vs obstacle at end of prev path.
+      // if (s > ref_s && s - ref_s < obstacle_detection_delta_s) { 
+      //   too_close = true;
+      //   closest_obstacle_speed = obstacle_speed;
+
+      //   break; // should be safe to break b/c cars appear from farther away closer.
+      // }
+    }
+  }
+}
+
 int main() {
   uWS::Hub h;
 
@@ -201,12 +250,11 @@ int main() {
   	map_waypoints_dy.push_back(d_y);
   }
 
-  int lane = 1;
-  // double ref_vel = 49.5; //  / 2.236936;
-  double ref_vel = 0;
+  int target_lane_ind = 1;
+  double end_path_speed = 0;
 
   h.onMessage(
-    [&ref_vel, &lane,
+    [&end_path_speed, &target_lane_ind,
     &map_waypoints_x,&map_waypoints_y,&map_waypoints_s,&map_waypoints_dx,&map_waypoints_dy
     ]
     (uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length,
@@ -239,59 +287,71 @@ int main() {
         	// Previous path data given to the Planner
         	auto previous_path_x = j[1]["previous_path_x"];
         	auto previous_path_y = j[1]["previous_path_y"];
+          size_t previous_path_size = previous_path_x.size();
+
         	// Previous path's end s and d values 
         	double end_path_s = j[1]["end_path_s"];
         	double end_path_d = j[1]["end_path_d"];
 
         	// Sensor Fusion Data, a list of all other cars on the same side of the road.
-        	auto sensor_fusion = j[1]["sensor_fusion"];
+        	vector<vector<double> > obstacles = j[1]["sensor_fusion"];
 
           ///////////////////////////
 
+          // TODO consts here
+
+          // double lane_width = 4; // meter
+          // double obstacle_detection_delta_s = 30; // meter
+
+          // == `0.5 / 2.236936`. I don't think this calculation is meaningful. But it works.
+          double default_accel = .224; // meter/sec/sec
+
+          double mps_to_mph = 2.236936; // 1 meter/sec equals this much mile/hour
           
+          ///////////////////////////
 
-          int prev_size = previous_path_x.size();
-
-
-          ///---
-
-          if (prev_size > 0) {
+          // set car_s and car_d to the end of the existing path
+          if (previous_path_size > 0) {
             car_s = end_path_s;
+            car_d = end_path_d;
           }
 
           bool too_close = false;
           double closest_obstacle_speed = std::numeric_limits<double>::max();
 
-          for (int i = 0; i < sensor_fusion.size(); i++) {
-            float d = sensor_fusion[i][6];
-            if (d < 2 + 4 * lane + 2 && d > 2 + 4 * lane - 2) {
-              double vx = sensor_fusion[i][3];
-              double vy = sensor_fusion[i][4];
-              double check_speed = sqrt(pow(vx, 2) + pow(vy, 2));
-              double check_car_s = sensor_fusion[i][5];
+          // compare position of self vs obstacle at end of prev path.
 
-              check_car_s += (double) prev_size * 0.02 * check_speed; // assuming obstacle moves at contant speed.
+          int obstacle_ind_ahead = -1, _;
+          find_closest_obstacle(obstacles, target_lane_ind, car_s, obstacle_ind_ahead, _);
 
-              if (check_car_s > car_s && check_car_s - car_s < 30) { // compare position of self vs obstacle at end of prev path.
-                // ref_vel = 29.5; // causes instantaneous change in speed
-                too_close = true;
-                closest_obstacle_speed = check_speed;
-                lane -= 1; // debug. always go to left lane
+          if (obstacle_ind_ahead > -1) {
+            vector<double> obstacle = obstacles[obstacle_ind_ahead];
 
-                std::cout << "too_close is true, " << closest_obstacle_speed << ' ' << ref_vel << "\n";
+            double vx = obstacle[3];
+            double vy = obstacle[4];
+            double obstacle_speed = sqrt(pow(vx, 2) + pow(vy, 2));
+            double obstacle_pos_s = obstacle[5];
 
-                break; // should be safe to break b/c cars appear from farther away closer.
-              }
+            double obstacle_future_pos_s = obstacle_pos_s + (double) previous_path_size * 0.02 * obstacle_speed; // TODO understand and explain
+
+            if (obstacle_future_pos_s - car_s < obstacle_detection_delta_s) {
+              too_close = true;
+              closest_obstacle_speed = obstacle_speed;
             }
           }
+
 
           // change velocity for all points output in this iteration
           // further optimization todo would change velocity within points output in this iteration
           // another problem is when there is an obstacle, the target never stabliizes at obstacle's speed but instead fluctuates lte that speed.
-          if (too_close && ref_vel > closest_obstacle_speed) {
-            ref_vel -= .224; // this value is for acc by 5m/s/s
-          } else if (ref_vel < 49.5) {
-            ref_vel += .224;
+          if (too_close) {
+            cout << "too_close! " << end_path_speed << " " << closest_obstacle_speed << '\n';
+            target_lane_ind -= 1; // debug. always go to left lane
+            if (end_path_speed > closest_obstacle_speed) {
+              end_path_speed -= default_accel; 
+            }
+          } else if (end_path_speed < 49.5) {
+            end_path_speed += default_accel;
           }
 
           ///---
@@ -301,21 +361,23 @@ int main() {
 
           // these refs contain info for the starting point of additional path generation
           // ie they're based on 2 previous points.
-          double ref_x = car_x;
-          double ref_y = car_y;
-          double ref_yaw = deg2rad(car_yaw);
+          double ref_x, ref_y, ref_yaw;
 
           // add 2 previous points to markers
-          if (prev_size < 2) {
+          if (previous_path_size < 2) {
+            ref_x = car_x;
+            ref_y = car_y;
+            ref_yaw = deg2rad(car_yaw);
+
             ptsx.push_back(car_x - cos(car_yaw));
             ptsy.push_back(car_y - sin(car_yaw));
             ptsx.push_back(car_x);
             ptsy.push_back(car_y);
           } else {
-            ref_x = previous_path_x[prev_size - 1];
-            ref_y = previous_path_y[prev_size - 1];
-            double ref_x_prev = previous_path_x[prev_size - 2];
-            double ref_y_prev = previous_path_y[prev_size - 2];
+            ref_x = previous_path_x[previous_path_size - 1];
+            ref_y = previous_path_y[previous_path_size - 1];
+            double ref_x_prev = previous_path_x[previous_path_size - 2];
+            double ref_y_prev = previous_path_y[previous_path_size - 2];
             ref_yaw = atan2(ref_y - ref_y_prev, ref_x - ref_x_prev);
 
             ptsx.push_back(ref_x_prev);
@@ -326,9 +388,9 @@ int main() {
 
           // add more markers. add sparse points. pick s,d and convert to x,y using getXY()
           // 30 meters is far ahead enough for lane change
-          vector<double> next_wp0 = getXY(car_s + 30, 2 + 4 * lane, map_waypoints_s, map_waypoints_x, map_waypoints_y);
-          vector<double> next_wp1 = getXY(car_s + 60, 2 + 4 * lane, map_waypoints_s, map_waypoints_x, map_waypoints_y);
-          vector<double> next_wp2 = getXY(car_s + 90, 2 + 4 * lane, map_waypoints_s, map_waypoints_x, map_waypoints_y);
+          vector<double> next_wp0 = getXY(car_s + 30, 2 + 4 * target_lane_ind, map_waypoints_s, map_waypoints_x, map_waypoints_y);
+          vector<double> next_wp1 = getXY(car_s + 60, 2 + 4 * target_lane_ind, map_waypoints_s, map_waypoints_x, map_waypoints_y);
+          vector<double> next_wp2 = getXY(car_s + 90, 2 + 4 * target_lane_ind, map_waypoints_s, map_waypoints_x, map_waypoints_y);
           ptsx.push_back(next_wp0[0]);
           ptsx.push_back(next_wp1[0]);
           ptsx.push_back(next_wp2[0]);
@@ -352,7 +414,7 @@ int main() {
         	vector<double> next_y_vals;
 
           // add back all previous points
-          for (int i = 0; i < prev_size; i++) {
+          for (int i = 0; i < previous_path_size; i++) {
             next_x_vals.push_back(previous_path_x[i]);
             next_y_vals.push_back(previous_path_y[i]);
           }
@@ -362,19 +424,15 @@ int main() {
           double target_x = 30; // arbitrary. this is NOT the limit of further x being added.
           double target_y = s(target_x);
           double target_dist = sqrt(pow(target_x, 2) + pow(target_y, 2));
-          double N = target_dist / (0.02 * ref_vel / 2.236936);
+          double N = target_dist / (0.02 * end_path_speed / mps_to_mph);
           double x_interval = target_x / N;
-
-          // this tracks furtherst x so far
-          double x_add_on = 0; // this is meters in p coord
 
           // add as many points as needed to refill 50. this 50 count limits further x to be added.
           // generate in p,q; transform to x,y; add to next_x_vals and next_y_vals vectors.
-          for (int i = 0; i <= 50 - prev_size; i++) {
-            double x_point = x_add_on + x_interval;
+          for (int i = 0; i <= 50 - previous_path_size; i++) {
+            // to avoid repeating ref_x and ref_y, must use `+1`. makes a big difference!
+            double x_point = x_interval * (i + 1);
             double y_point = s(x_point);
-
-            x_add_on = x_point;
 
             double x_ref = x_point;
             double y_ref = y_point;
@@ -397,17 +455,15 @@ int main() {
 
           ///////////////////////////
 
-
         	// TODO: define a path made up of (x,y) points that the car will visit sequentially every .02 seconds
           json msgJson;
         	msgJson["next_x"] = next_x_vals;
         	msgJson["next_y"] = next_y_vals;
 
         	auto msg = "42[\"control\","+ msgJson.dump()+"]";
-
-        	//this_thread::sleep_for(chrono::milliseconds(1000));
         	ws.send(msg.data(), msg.length(), uWS::OpCode::TEXT);
-          
+
+          //this_thread::sleep_for(chrono::milliseconds(1000));
         }
       } else {
         // Manual driving
