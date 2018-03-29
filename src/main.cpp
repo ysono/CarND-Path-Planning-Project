@@ -166,51 +166,60 @@ vector<double> getXY(double s, double d, const vector<double> &maps_s, const vec
 
 //////////////////
 // TODO consts here
+int num_lanes = 3;
 double lane_width = 4; // meter
 double obstacle_detection_delta_s = 30; // meter
 //////////////////
 
-void find_closest_obstacle(const vector<vector<double> > & obstacles,
-    int target_lane_ind, double ref_s,
-    int & closest_ind_ahead, int & closest_ind_behind) { // TODO take multiple target lane inds
-  double closest_s_ahead = std::numeric_limits<double>::max();
-  double closest_s_behind = - std::numeric_limits<double>::max();
+int lane_d_to_index(double d) {
+  return floor(d / lane_width);
+}
 
-  for (int i = 0; i < obstacles.size(); i++) {
-    double d_center = lane_width / 2 + lane_width * target_lane_ind;
-    // Include obstacles whose centers are up to 3/4 of a lane off the center of the target lane.
-    double d_lo = d_center - lane_width / 4 * 3;
-    double d_hi = d_center + lane_width / 4 * 3;
+/**
+  * Returns indexes of {
+  *   lane 0 ahead, lane 1 ahead, lane 2 ahead,
+  *   lane 0 behind, lane 1 behind, lane 2 behind
+  * }
+  */
+vector<int> find_closest_obstacles(const vector<vector<double> > & obstacles, double ref_s) {
 
-    float d = obstacles[i][6];
-    if (d_lo < d && d < d_hi) {
+  vector<int> obstacle_inds(num_lanes * 2, -1);
 
+  vector<double> closest_s_ahead(num_lanes, std::numeric_limits<double>::max());
+  vector<double> closest_s_behind(num_lanes, - std::numeric_limits<double>::max());
 
+  double d_buffer = lane_width / 4;
 
-      // double vx = obstacles[i][3];
-      // double vy = obstacles[i][4];
-      // double obstacle_speed = sqrt(pow(vx, 2) + pow(vy, 2));
-      double s = obstacles[i][5];
+  for (int obstacle_ind = 0; obstacle_ind < obstacles.size(); obstacle_ind++) {
+    vector<double> obstacle = obstacles[obstacle_ind];
+    double d = obstacle[6];
+    double s = obstacle[5];
 
-      if (s > ref_s && s < closest_s_ahead) {
-        closest_s_ahead = s;
-        closest_ind_ahead = i;
-      } else if (s < ref_s && s > closest_s_behind) {
-        closest_s_behind = s;
-        closest_ind_behind = i;
+    vector<int> relevant_lane_inds;
+    if (d < lane_width + d_buffer) {
+      relevant_lane_inds.push_back(0);
+    }
+    if (lane_width - d_buffer < d && d < lane_width * 2 + d_buffer) {
+      relevant_lane_inds.push_back(1);
+    }
+    if (lane_width * 2 - d_buffer < d) {
+      relevant_lane_inds.push_back(2);
+    }
+
+    for(unsigned int i = 0; i < relevant_lane_inds.size(); i++) {
+      int lane_ind = relevant_lane_inds[i];
+
+      if (s > ref_s && s < closest_s_ahead[lane_ind]) {
+        closest_s_ahead[lane_ind] = s;
+        obstacle_inds[lane_ind] = obstacle_ind;
+      } else if (s < ref_s && s > closest_s_behind[lane_ind]) {
+        closest_s_behind[lane_ind] = s;
+        obstacle_inds[lane_ind + num_lanes] = obstacle_ind;
       }
-
-      // s += (double) previous_path_size * 0.02 * obstacle_speed;
-
-      // // compare position of self vs obstacle at end of prev path.
-      // if (s > ref_s && s - ref_s < obstacle_detection_delta_s) { 
-      //   too_close = true;
-      //   closest_obstacle_speed = obstacle_speed;
-
-      //   break; // should be safe to break b/c cars appear from farther away closer.
-      // }
     }
   }
+
+  return obstacle_inds;
 }
 
 int main() {
@@ -307,6 +316,8 @@ int main() {
           double default_accel = .224; // meter/sec/sec
 
           double mps_to_mph = 2.236936; // 1 meter/sec equals this much mile/hour
+
+          double path_interval = 0.02; // sec
           
           ///////////////////////////
 
@@ -317,26 +328,30 @@ int main() {
           }
 
           bool too_close = false;
-          double closest_obstacle_speed = std::numeric_limits<double>::max();
 
-          // compare position of self vs obstacle at end of prev path.
 
-          int obstacle_ind_ahead = -1, _;
-          find_closest_obstacle(obstacles, target_lane_ind, car_s, obstacle_ind_ahead, _);
+          vector<int> obstacle_inds = find_closest_obstacles(obstacles, car_s);
 
-          if (obstacle_ind_ahead > -1) {
-            vector<double> obstacle = obstacles[obstacle_ind_ahead];
+          if (obstacle_inds[target_lane_ind] != -1) {
+            vector<double> obstacle = obstacles[obstacle_inds[target_lane_ind]];
 
             double vx = obstacle[3];
             double vy = obstacle[4];
             double obstacle_speed = sqrt(pow(vx, 2) + pow(vy, 2));
             double obstacle_pos_s = obstacle[5];
 
-            double obstacle_future_pos_s = obstacle_pos_s + (double) previous_path_size * 0.02 * obstacle_speed; // TODO understand and explain
+            // Assuming obstacle keeps the same speed, it will be here by the time
+            // self get here.
+            double obstacle_future_pos_s =
+              obstacle_pos_s + (double) previous_path_size * path_interval * obstacle_speed;
 
             if (obstacle_future_pos_s - car_s < obstacle_detection_delta_s) {
               too_close = true;
-              closest_obstacle_speed = obstacle_speed;
+
+              // target_lane_ind -= 1; // TODO remove
+              if (end_path_speed > obstacle_speed) {
+                end_path_speed -= default_accel; 
+              }
             }
           }
 
@@ -345,11 +360,6 @@ int main() {
           // further optimization todo would change velocity within points output in this iteration
           // another problem is when there is an obstacle, the target never stabliizes at obstacle's speed but instead fluctuates lte that speed.
           if (too_close) {
-            cout << "too_close! " << end_path_speed << " " << closest_obstacle_speed << '\n';
-            target_lane_ind -= 1; // debug. always go to left lane
-            if (end_path_speed > closest_obstacle_speed) {
-              end_path_speed -= default_accel; 
-            }
           } else if (end_path_speed < 49.5) {
             end_path_speed += default_accel;
           }
@@ -424,7 +434,7 @@ int main() {
           double target_x = 30; // arbitrary. this is NOT the limit of further x being added.
           double target_y = s(target_x);
           double target_dist = sqrt(pow(target_x, 2) + pow(target_y, 2));
-          double N = target_dist / (0.02 * end_path_speed / mps_to_mph);
+          double N = target_dist / (path_interval * end_path_speed / mps_to_mph);
           double x_interval = target_x / N;
 
           // add as many points as needed to refill 50. this 50 count limits further x to be added.
