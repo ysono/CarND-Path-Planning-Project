@@ -111,17 +111,14 @@ int main(int argc, char* argv[]) {
     return getXY(s, d, map_waypoints_s, map_waypoints_x, map_waypoints_y);
   };
 
-  // The 3 stateful properties of the FSM.
-  FSM_State fsm_state = KEEP_LANE;
-  int target_lane = 1;
-  double target_speed = SPEED_LIMIT;
+  FSM fsm {KEEP_LANE, 1, SPEED_LIMIT};
 
   // A requried property of the previously planned path that's not retained and
   // provided by the simulator.
   double end_path_speed = 0;
 
   h.onMessage(
-    [&fsm_state, &target_lane, &target_speed,
+    [&fsm,
       &end_path_speed,
       &sd_to_xy,
       &debug]
@@ -178,12 +175,12 @@ int main(int argc, char* argv[]) {
           if (debug) {
             cout << "======" << endl;
             string mode_str;
-            if (fsm_state == KEEP_LANE) { mode_str = "KL "; }
-            if (fsm_state == PLAN_LANE_CHANGE) { mode_str = "PLC"; }
-            if (fsm_state == CHANGING_LANE) { mode_str = "CL "; }
+            if (fsm.state == KEEP_LANE) { mode_str = "KL "; }
+            if (fsm.state == PLAN_LANE_CHANGE) { mode_str = "PLC"; }
+            if (fsm.state == CHANGING_LANE) { mode_str = "CL "; }
             cout << "fsm_state " << mode_str
-              << " target_lane " << target_lane
-              << " target_speed " << target_speed << endl;
+              << " target_lane " << fsm.target_lane
+              << " target_speed " << fsm.target_speed << endl;
           }
 
           vector<double> next_path_x, next_path_y;
@@ -198,8 +195,8 @@ int main(int argc, char* argv[]) {
               telemetry.future_d = telemetry.now_d;
             }
 
-            std::tie(fsm_state, target_lane, target_speed) = iterate_fsm(
-              fsm_state, target_lane, target_speed,
+            fsm = iterate_fsm(
+              fsm,
               telemetry,
               debug);
             
@@ -209,7 +206,7 @@ int main(int argc, char* argv[]) {
             // Although it would be more effective to use different speeds for
             // points to be added, in practice it should make little difference
             // becuase we rarely have to generate more than 1 to 3 points.
-            if (end_path_speed < target_speed) {
+            if (end_path_speed < fsm.target_speed) {
               end_path_speed += DEFAULT_ACCEL;
             } else {
               end_path_speed -= DEFAULT_ACCEL;
@@ -217,7 +214,7 @@ int main(int argc, char* argv[]) {
 
             std::tie(next_path_x, next_path_y) = generate_path(
               telemetry,
-              end_path_speed, target_lane,
+              end_path_speed, fsm.target_lane,
               sd_to_xy);
           }
 

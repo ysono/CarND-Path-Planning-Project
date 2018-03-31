@@ -295,8 +295,8 @@ tuple<double, double> keep_lane(
   return std::make_tuple(SPEED_LIMIT, std::numeric_limits<double>::max());
 }
 
-tuple<FSM_State, int, double> iterate_fsm(
-    const FSM_State fsm_state, const int target_lane, const double target_speed,
+FSM iterate_fsm(
+    const FSM fsm,
     const Telemetry & telemetry,
     const bool debug) {
 
@@ -312,40 +312,40 @@ tuple<FSM_State, int, double> iterate_fsm(
   // The less positive the time-to-collision, the worse the cost.
   double default_target_speed, default_time_to_collision;
   std::tie(default_target_speed, default_time_to_collision) = keep_lane(
-    target_lane,
+    fsm.target_lane,
     closest_obstacle_inds,
     telemetry,
     debug);
 
-  if (fsm_state == KEEP_LANE) {
+  if (fsm.state == KEEP_LANE) {
     bool default_is_optimal =
       default_time_to_collision == std::numeric_limits<double>::max();
     FSM_State next_fsm_state = default_is_optimal ? KEEP_LANE : PLAN_LANE_CHANGE;
-    return std::make_tuple(next_fsm_state, target_lane, default_target_speed);
+    return FSM {next_fsm_state, fsm.target_lane, default_target_speed};
   }
 
-  if (fsm_state == PLAN_LANE_CHANGE) {
+  if (fsm.state == PLAN_LANE_CHANGE) {
     int alt_target_lane;
     double alt_target_speed, alt_time_to_collision;
     std::tie(alt_target_lane, alt_target_speed, alt_time_to_collision) =
       prepare_lane_change(
-        target_lane, target_speed,
+        fsm.target_lane, fsm.target_speed,
         closest_obstacle_inds,
         telemetry,
         debug);
 
     if (alt_time_to_collision < default_time_to_collision) {
-      return std::make_tuple(CHANGING_LANE, alt_target_lane, alt_target_speed);
+      return FSM {CHANGING_LANE, alt_target_lane, alt_target_speed};
     } else {
-      return std::make_tuple(PLAN_LANE_CHANGE, target_lane, default_target_speed);
+      return FSM {PLAN_LANE_CHANGE, fsm.target_lane, default_target_speed};
     }
   }
 
-  if (fsm_state == CHANGING_LANE) {
-    double d_error = fabs(lane_index_to_d(target_lane) - telemetry.future_d);
+  if (fsm.state == CHANGING_LANE) {
+    double d_error = fabs(lane_index_to_d(fsm.target_lane) - telemetry.future_d);
     if (d_error < LANE_CHANGE_COMPLETION_MARGIN) {
       // Changing lane is done.
-      return std::make_tuple(KEEP_LANE, target_lane, default_target_speed);
+      return FSM {KEEP_LANE, fsm.target_lane, default_target_speed};
     }
 
     // We check for the feasibility of the destination lane as we're moving into it.
@@ -355,7 +355,7 @@ tuple<FSM_State, int, double> iterate_fsm(
     // - came in from another lane
     double _, alt_time_to_collision;
     std::tie(_, alt_time_to_collision) = is_lane_feasible(
-      target_lane,
+      fsm.target_lane,
       closest_obstacle_inds,
       telemetry,
       debug);
@@ -365,10 +365,10 @@ tuple<FSM_State, int, double> iterate_fsm(
         cout << "abort changing lane !!!" << endl;
       }
       // Pass the current `telemetry.now_d`, rather than the future `end_path_d`.
-      int original_target_lane = lane_index_away(target_lane, telemetry.now_d);
-      return std::make_tuple(CHANGING_LANE, original_target_lane, default_target_speed);
+      int original_target_lane = lane_index_away(fsm.target_lane, telemetry.now_d);
+      return FSM {CHANGING_LANE, original_target_lane, default_target_speed};
     } else {
-      return std::make_tuple(CHANGING_LANE, target_lane, default_target_speed);
+      return FSM {CHANGING_LANE, fsm.target_lane, default_target_speed};
     }
   }
 

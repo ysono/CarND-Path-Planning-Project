@@ -67,12 +67,18 @@ struct Obstacle {
 
 enum FSM_State {KEEP_LANE, PLAN_LANE_CHANGE, CHANGING_LANE};
 
+struct FSM {
+  FSM_State state;
+  int target_lane;
+  double target_speed;
+};
+
 
 /**
   * Returns (FSM state, target lane, target speed).
   */
-std::tuple<FSM_State, int, double> iterate_fsm(
-  const FSM_State fsm_state, const int target_lane, const double target_speed,
+FSM iterate_fsm(
+  const FSM fsm,
   const Telemetry & telemetry,
   const bool debug);
 
