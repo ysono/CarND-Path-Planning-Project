@@ -6,6 +6,8 @@
 #include <tuple>
 #include <functional>
 
+const double MAX_DOUBLE = std::numeric_limits<double>::max();
+
 const double MPS_TO_MPH = 2.236936; // 1 meter/sec equals this much mile/hour
 
 const double SPEED_LIMIT = 49.5; // mph
