@@ -39,7 +39,7 @@ const double output_path_duration = 1; // sec
 const int num_output_path_points = ceil(output_path_duration / path_interval);
 
 
-enum Mode {KEEP_LANE, PLAN_LANE_CHANGE,};
+enum Mode {KEEP_LANE, PLAN_LANE_CHANGE, CHANGING_LANE};
 
 
 // For converting back and forth between radians and degrees.
@@ -92,6 +92,12 @@ vector<double> getXY(double s, double d, const vector<double> &maps_s, const vec
 
 double lane_index_to_d(int lane_index) {
   return lane_width / 2 + lane_width * lane_index;
+}
+
+double d_to_lane_offset(double d) {
+  int lane_ind = floor(d / lane_width);
+  double lane_center_d = lane_index_to_d(lane_ind);
+  return d - lane_center_d;
 }
 
 /**
@@ -150,12 +156,13 @@ double extract_obstacle_position(const vector<double> & obstacle) {
 }
 
 /**
-  * Assigns `target_speed`, `target_lane`, and `mode`.
+  * Assigns `target_lane` and `target_speed`.
+  * Returns whether lane change is ready.
   */
-void prepare_lane_change(
+bool prepare_lane_change(
     const vector<vector<double> > & obstacles, const vector<int> & closest_obstacle_inds,
     const double end_path_s, const double prev_path_duration,
-    int & target_lane, Mode & mode, double & target_speed,
+    int & target_lane, double & target_speed,
     const bool debug) {
 
   vector<int> adjacent_lanes; // in the order of preference
@@ -179,8 +186,7 @@ void prepare_lane_change(
       // Execute lane change. Go at speed limit.
       target_speed = speed_limit;
       target_lane = adj_lane;
-      mode = KEEP_LANE;
-      return;
+      return true;
     }
 
     // Just extracting data. No decision to change FSM is made in this `if` block.
@@ -220,8 +226,7 @@ void prepare_lane_change(
         // Execute lane change. Go at speed limit.
         target_speed = speed_limit;
         target_lane = adj_lane;
-        mode = KEEP_LANE;
-        return;
+        return true;
       }
 
       // Evaluate other lanes.
@@ -265,33 +270,31 @@ void prepare_lane_change(
       // Execute lane change. Go at speed of obstacle ahead.
       target_speed = obst_ahead_speed;
       target_lane = adj_lane;
-      mode = KEEP_LANE;
-      return;
+      return true;
     }
 
     // Try other lanes.
 
   } // end of `for each lane in adjacent_lanes`
+
+  return false;
 }
 
 /**
-  * Assigns `target_speed` and `mode`.
+  * Returns target speed.
   */
-void keep_lane(
+double keep_lane(
     const int target_lane,
     const vector<vector<double> > & obstacles, const vector<int> & closest_obstacle_inds,
     const double car_s, const double car_speed,
     const double end_path_s, const double end_path_speed,
     const double prev_path_duration,
-    double & target_speed, Mode & mode,
     const bool debug) {
 
   int obstacle_ind_ahead = closest_obstacle_inds[target_lane];
   
   if (obstacle_ind_ahead == -1) {
-    target_speed = speed_limit;
-    mode = KEEP_LANE;
-    return;
+    return speed_limit;
   }
 
   vector<double> obstacle_ahead = obstacles[obstacle_ind_ahead];
@@ -317,9 +320,7 @@ void keep_lane(
   }
 
   if (too_close_now) {
-    target_speed = obst_speed;
-    mode = PLAN_LANE_CHANGE;
-    return;
+    return obst_speed;
   }
 
   double obst_pos_endpath = obst_pos_now + obst_speed * prev_path_duration;
@@ -338,14 +339,12 @@ void keep_lane(
   }
 
   if (too_close_endpath) {
-    target_speed = obst_speed;
-    mode = PLAN_LANE_CHANGE;
-    return;
+    return obst_speed;
   }
 
-  target_speed = speed_limit;
-  mode = KEEP_LANE;
+  return speed_limit;
 }
+
 
 int main(int argc, char* argv[]) {
   bool debug = argc >= 2 && strcmp(argv[1], "--debug") == 0;
@@ -432,7 +431,7 @@ int main(int argc, char* argv[]) {
 
         	// Previous path's end s and d values 
         	double end_path_s = j[1]["end_path_s"];
-        	// double end_path_d = j[1]["end_path_d"]; // not used
+        	double end_path_d = j[1]["end_path_d"];
 
         	// Sensor Fusion Data, a list of all other cars on the same side of the road.
         	vector<vector<double> > obstacles = j[1]["sensor_fusion"];
@@ -448,21 +447,37 @@ int main(int argc, char* argv[]) {
           // Use the self's current position as the reference when finding closest obstacles.
           vector<int> closest_obstacle_inds = find_closest_obstacles(obstacles, car_s);
 
-          if (mode == KEEP_LANE) {
-            keep_lane(
+          if (mode == PLAN_LANE_CHANGE) {
+            bool is_lane_change_ready = prepare_lane_change(
+              obstacles, closest_obstacle_inds,
+              end_path_s, prev_path_duration,
+              target_lane, target_speed,
+              debug);
+
+            if (is_lane_change_ready) {
+              mode = CHANGING_LANE;
+            }
+          } else {
+            // for both modes KEEP_LANE and CHANGING_LANE
+            target_speed = keep_lane(
               target_lane,
               obstacles, closest_obstacle_inds,
               car_s, car_speed,
               end_path_s, end_path_speed,
               prev_path_duration,
-              target_speed, mode,
               debug);
-          } else if (mode == PLAN_LANE_CHANGE) {
-            prepare_lane_change(
-              obstacles, closest_obstacle_inds,
-              end_path_s, prev_path_duration,
-              target_lane, mode, target_speed,
-              debug);
+
+            bool recommend_lane_change = target_speed < speed_limit;
+
+            if (mode == KEEP_LANE) {
+              if (recommend_lane_change) {
+                mode = PLAN_LANE_CHANGE;
+              }
+            } else if (mode == CHANGING_LANE) {
+              if (fabs(d_to_lane_offset(end_path_d)) < lane_detection_buffer) {
+                mode = recommend_lane_change ? PLAN_LANE_CHANGE : KEEP_LANE;
+              }
+            }
           }
 
           // For all modes, adjust acceleration only.
@@ -480,6 +495,7 @@ int main(int argc, char* argv[]) {
             string mode_str;
             if (mode == KEEP_LANE) { mode_str = "KL "; }
             if (mode == PLAN_LANE_CHANGE) { mode_str = "PLC"; }
+            if (mode == CHANGING_LANE) { mode_str = "CL "; }
             cout << "mode " << mode_str
               << " target_lane " << target_lane
               << " target_speed " << target_speed << endl;
