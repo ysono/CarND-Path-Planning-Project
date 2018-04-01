@@ -29,7 +29,10 @@ const double lane_detection_buffer = lane_width / 8;
 // Min front/back (s direction) distance required as a precondition for lane change.
 // For safety, buffer behind should be much larger than that ahead.
 // But mathematically this works. (And our car is an aggressive lane changer.)
-const double lane_change_buffer = 3; // meter
+const double lane_change_buffer_s = 3; // meter
+
+// Lane change is considered complete when the d settles within this distance from target lane center.
+const double lane_change_completion_margin = lane_width / 40; // 10 cm margin => 20cm width
 
 // The min/max bound of time to collision, inside which it is considered to be dangerous.
 const double min_time_to_collision = 0; // sec
@@ -98,6 +101,17 @@ double lane_index_to_d(int lane_index) {
   return lane_width / 2 + lane_width * lane_index;
 }
 
+int lane_index_away(int from_lane_index, double to_d) {
+  double from_d = lane_index_to_d(from_lane_index);
+  if (from_d == to_d) {
+    return from_lane_index;
+  } else if (from_d < to_d) {
+    return min(num_lanes - 1, from_lane_index + 1);
+  } else {
+    return max(0, from_lane_index - 1);
+  }
+}
+
 /**
   * Returns obstacle indexes of {
   *   lane 0 ahead, lane 1 ahead, lane 2 ahead,
@@ -156,13 +170,120 @@ double extract_obstacle_position(const vector<double> & obstacle) {
 }
 
 /**
+  * Returns whether setting the given lane as the target is
+  * 1) safe to do, and
+  * 2) advantageous compared to reference time-to-collision.
+  *
+  * Returns (whether safe, target speed)
+  */
+std::tuple<bool, double> is_lane_optimal(
+    const int lane,
+    const vector<vector<double> > & obstacles, const vector<int> & closest_obstacle_inds,
+    const double end_path_s, const double end_path_speed, const double prev_path_duration,
+    const double ref_time_to_collision,
+    const bool debug) {
+
+  int obstacle_ind_ahead = closest_obstacle_inds[lane];
+  int obstacle_ind_behind = closest_obstacle_inds[lane + num_lanes];
+
+  if (obstacle_ind_ahead == -1 && obstacle_ind_behind == -1) {
+    // No one ahead or behind in the adjacent lane.
+    // Execute lane change. Go at speed limit.
+    return std::make_tuple(true, speed_limit);
+  }
+
+  // Just extracting data. No decision to change FSM is made in this block.
+  bool behind_is_ok = true;
+  if (obstacle_ind_behind != -1) {
+    vector<double> obstacle_behind = obstacles[obstacle_ind_behind];
+    double obst_speed = extract_obstacle_speed(obstacle_behind);
+    double obst_pos_endpath = extract_obstacle_position(obstacle_behind) + obst_speed * prev_path_duration;
+
+    double dist_gap = end_path_s - obst_pos_endpath;
+    double speed_gap = end_path_speed - obst_speed;
+    double time_to_collision = -dist_gap / speed_gap;
+
+    behind_is_ok =
+      dist_gap > lane_change_buffer_s &&
+      (time_to_collision < min_time_to_collision ||
+        time_to_collision > max_time_to_collision);
+
+    if (debug) {
+      cout << "v dist_gap "
+        << (dist_gap > lane_change_buffer_s ? "" : "! ")
+        << dist_gap << endl;
+      cout << "v time_to_collision "
+        << (time_to_collision < min_time_to_collision ||
+            time_to_collision > max_time_to_collision ? "" : "! ")
+        << time_to_collision << endl;
+    }
+  }
+
+  if (obstacle_ind_ahead == -1) {
+    // No one ahead. By logic, there is someone behind.
+
+    if (behind_is_ok) {
+      // Execute lane change. Go at speed limit.
+      return std::make_tuple(true, speed_limit);
+    }
+
+    // Evaluate other lanes.
+    return std::make_tuple(false, -1);
+  }
+
+  // By logic, there is someone ahead.
+  // Just extracting data. No decision to change FSM is made in this block.
+  bool ahead_is_ok;
+  double obst_ahead_speed;
+  {
+    // (Lines in this block can be reordered to be more performant.
+    // But I prefer readability.)
+
+    vector<double> obstacle_ahead = obstacles[obstacle_ind_ahead];
+    double obst_speed = extract_obstacle_speed(obstacle_ahead);
+    double obst_pos_endpath = extract_obstacle_position(obstacle_ahead) + obst_speed * prev_path_duration;
+
+    double dist_gap = obst_pos_endpath - end_path_s;
+    double speed_gap = obst_speed - end_path_speed;
+    double time_to_collision = -dist_gap / speed_gap;
+
+    ahead_is_ok = 
+      dist_gap > lane_change_buffer_s &&
+      time_to_collision > max_time_to_collision &&
+      time_to_collision > ref_time_to_collision;
+
+    obst_ahead_speed = obst_speed;
+
+    if (debug) {
+      cout << "^ dist_gap "
+        << (dist_gap > lane_change_buffer_s ? "" : "! ")
+        << dist_gap << endl;
+      cout << "^ time_to_collision "
+        << (time_to_collision < min_time_to_collision ||
+            time_to_collision > max_time_to_collision ? "" : "! ")
+        << time_to_collision << endl;
+      cout << "^ improvement in time_to_collision "
+        << (time_to_collision > ref_time_to_collision ? "" : "! ")
+        << (time_to_collision - ref_time_to_collision) << endl;
+    }
+  }
+
+  if (ahead_is_ok && behind_is_ok) {
+    // Execute lane change. Go at speed of obstacle ahead.
+    return std::make_tuple(true, obst_ahead_speed);
+  }
+
+  return std::make_tuple(false, -1);
+}
+
+/**
   * Returns (whether lane change is safe to execute, target lane, target speed)
   */
 std::tuple<bool, int, double> prepare_lane_change(
     const int target_lane, const double target_speed,
     const vector<vector<double> > & obstacles, const vector<int> & closest_obstacle_inds,
     const double end_path_s, const double end_path_speed, const double prev_path_duration,
-    const double time_to_collision_if_keep_lane, // TODO use this
+    const double time_to_collision_if_keep_lane,
     const bool debug) {
 
   vector<int> adjacent_lanes; // in the order of preference
@@ -178,99 +299,20 @@ std::tuple<bool, int, double> prepare_lane_change(
       cout << "adj_lane " << adj_lane << endl;
     }
 
-    int obstacle_ind_ahead = closest_obstacle_inds[adj_lane];
-    int obstacle_ind_behind = closest_obstacle_inds[adj_lane + num_lanes];
+    bool is_lane_change_ready;
+    double adj_lane_speed;
+    std::tie(is_lane_change_ready, adj_lane_speed) = is_lane_optimal(
+      adj_lane,
+      obstacles, closest_obstacle_inds,
+      end_path_s, end_path_speed, prev_path_duration,
+      time_to_collision_if_keep_lane,
+      debug);
 
-    if (obstacle_ind_ahead == -1 && obstacle_ind_behind == -1) {
-      // No one ahead or behind in the adjacent lane.
-      // Execute lane change. Go at speed limit.
-      return std::make_tuple(true, adj_lane, speed_limit);
+    if (is_lane_change_ready) {
+      return std::make_tuple(is_lane_change_ready, adj_lane, adj_lane_speed);
     }
 
-    // Just extracting data. No decision to change FSM is made in this block.
-    bool behind_is_ok = true;
-    if (obstacle_ind_behind != -1) {
-      vector<double> obstacle_behind = obstacles[obstacle_ind_behind];
-      double obst_speed = extract_obstacle_speed(obstacle_behind);
-      double obst_pos_endpath = extract_obstacle_position(obstacle_behind) + obst_speed * prev_path_duration;
-
-      double dist_gap = end_path_s - obst_pos_endpath;
-      double speed_gap = end_path_speed - obst_speed;
-      double time_to_collision = -dist_gap / speed_gap;
-
-      behind_is_ok =
-        dist_gap > lane_change_buffer &&
-        (time_to_collision < min_time_to_collision ||
-          time_to_collision > max_time_to_collision);
-
-      if (debug) {
-        cout << "v dist_gap "
-          << (dist_gap > lane_change_buffer ? "" : "! ")
-          << dist_gap << endl;
-        cout << "v time_to_collision "
-          << (time_to_collision < min_time_to_collision ||
-              time_to_collision > max_time_to_collision ? "" : "! ")
-          << time_to_collision << endl;
-      }
-    }
-
-    if (obstacle_ind_ahead == -1) {
-      // No one ahead. By logic, there is someone behind.
-
-      if (behind_is_ok) {
-        // Execute lane change. Go at speed limit.
-        return std::make_tuple(true, adj_lane, speed_limit);
-      }
-
-      // Evaluate other lanes.
-      continue;
-    }
-
-    // By logic, there is someone ahead.
-    // Just extracting data. No decision to change FSM is made in this block.
-    bool ahead_is_ok;
-    double obst_ahead_speed;
-    {
-      // (Lines in this block can be reordered to be more performant.
-      // But I prefer readability.)
-
-      vector<double> obstacle_ahead = obstacles[obstacle_ind_ahead];
-      double obst_speed = extract_obstacle_speed(obstacle_ahead);
-      double obst_pos_endpath = extract_obstacle_position(obstacle_ahead) + obst_speed * prev_path_duration;
-
-      double dist_gap = obst_pos_endpath - end_path_s;
-      double speed_gap = obst_speed - end_path_speed;
-      double time_to_collision = -dist_gap / speed_gap;
-
-      ahead_is_ok = 
-        dist_gap > lane_change_buffer &&
-        time_to_collision > max_time_to_collision &&
-        time_to_collision > time_to_collision_if_keep_lane;
-
-      obst_ahead_speed = obst_speed;
-
-      if (debug) {
-        cout << "^ dist_gap "
-          << (dist_gap > lane_change_buffer ? "" : "! ")
-          << dist_gap << endl;
-        cout << "^ time_to_collision "
-          << (time_to_collision < min_time_to_collision ||
-              time_to_collision > max_time_to_collision ? "" : "! ")
-          << time_to_collision << endl;
-        cout << "^ improvement in time_to_collision "
-          << (time_to_collision > time_to_collision_if_keep_lane ? "" : "! ")
-          << (time_to_collision - time_to_collision_if_keep_lane) << endl;
-      }
-    }
-
-    if (ahead_is_ok && behind_is_ok) {
-      // Execute lane change. Go at speed of obstacle ahead.
-      return std::make_tuple(true, adj_lane, obst_ahead_speed);
-    }
-
-    // Try other lanes.
-
-  } // end of `for each lane in adjacent_lanes`
+  }
 
   // Return the provided target lane and target speed unchanged.
   return std::make_tuple(false, target_lane, target_speed);
@@ -418,7 +460,7 @@ int main(int argc, char* argv[]) {
         	double car_x = j[1]["x"];
         	double car_y = j[1]["y"];
         	double car_s = j[1]["s"];
-        	// double car_d = j[1]["d"]; // not used
+        	double car_d = j[1]["d"];
         	double car_yaw = j[1]["yaw"]; car_yaw = deg2rad(car_yaw); // deg
         	double car_speed = j[1]["speed"];
 
@@ -461,11 +503,38 @@ int main(int argc, char* argv[]) {
               mode = PLAN_LANE_CHANGE;
             }
           } else if (mode == CHANGING_LANE) {
+
             double d_error = fabs(lane_index_to_d(target_lane) - end_path_d);
-            if (d_error < lane_detection_buffer) {
+            if (d_error < lane_change_completion_margin) {
               mode = KEEP_LANE;
+            } else {
+
+              // Use a non-optimal reference time-to-collision of `-1`.
+              bool is_lane_change_safe;
+              double _;
+              std::tie(is_lane_change_safe, _) = is_lane_optimal(
+                target_lane,
+                obstacles, closest_obstacle_inds,
+                end_path_s, end_path_speed, prev_path_duration,
+                -1,
+                debug);
+              if (! is_lane_change_safe) {
+                // I believe this happens when the obstacle in the lane to change
+                // to behind the self either
+                // - came from the same lane and accelerated
+                // - came from another lane
+                // Either way, the presence of this obstacle behind must not
+                // have been accounted for when originally planning the current
+                // lane change.
+
+                // Pass the current position in d, rather than d at the pathend.
+                target_lane = lane_index_away(target_lane, car_d);
+
+                // Not assigning `target_speed`. Let the next iteration handle it.
+              }
             }
-          }
+
+          } // end `if mode == CHANGING_LANE`
 
           if (mode == PLAN_LANE_CHANGE) {
             // Time to collision is the cost function for choosing between
