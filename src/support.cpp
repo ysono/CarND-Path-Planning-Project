@@ -7,6 +7,8 @@ using std::endl;
 using std::tuple;
 using std::vector;
 
+bool PP_DEBUG = false;
+
 double lane_index_to_d(int lane_index) {
   return LANE_WIDTH / 2 + LANE_WIDTH * lane_index;
 }
@@ -132,28 +134,28 @@ ObstacleRelationship calc_obstacle_relationship(
   return ObstacleRelationship {abs_pos_gap, time_to_collision};
 }
 
-bool is_time_to_collision_safe(double time_to_collision, bool follow_or_plan, bool debug) {
+bool is_position_gap_safe(double position_gap, bool follow_or_plan) {
+  double min_safe = follow_or_plan ?
+    MAX_SAFE_POSITION_GAP_FOLLOWING :
+    MAX_SAFE_POSITION_GAP_PLC;
+  bool is_safe = position_gap > min_safe;
+  if (PP_DEBUG) {
+    cout << "position gap is " << (is_safe ? "" : "NOT ") << "safe "
+      << min_safe << ' ' << position_gap << endl;
+  }
+  return is_safe;
+}
+
+bool is_time_to_collision_safe(double time_to_collision, bool follow_or_plan) {
   double max_unsafe = follow_or_plan ?
     MAX_UNSAFE_TIME_TO_COLLISION_FOLLOWING :
     MAX_UNSAFE_TIME_TO_COLLISION_PLC;
   bool is_safe =
     time_to_collision < MIN_UNSAFE_TIME_TO_COLLISION ||
     time_to_collision > max_unsafe;
-  if (debug) {
+  if (PP_DEBUG) {
     cout << "time to collision is " << (is_safe ? "" : "NOT ") << "safe "
       << max_unsafe << ' ' << time_to_collision << endl;
-  }
-  return is_safe;
-}
-
-bool is_position_gap_safe(double position_gap, bool follow_or_plan, bool debug) {
-  double min_safe = follow_or_plan ?
-    MAX_SAFE_POSITION_GAP_FOLLOWING :
-    MAX_SAFE_POSITION_GAP_PLC;
-  bool is_safe = position_gap > min_safe;
-  if (debug) {
-    cout << "position gap is " << (is_safe ? "" : "NOT ") << "safe "
-      << min_safe << ' ' << position_gap << endl;
   }
   return is_safe;
 }
@@ -163,10 +165,10 @@ bool is_position_gap_safe(double position_gap, bool follow_or_plan, bool debug) 
   * - true if the purpose of validation is to follow
   * - false if the purpose is theoretical evaluation about whether lane change is possible
   */
-bool is_obstacle_relationship_safe(const ObstacleRelationship & rel, bool follow_or_plan, bool debug) {
+bool is_obstacle_relationship_safe(const ObstacleRelationship & rel, bool follow_or_plan) {
   return
-    is_time_to_collision_safe(rel.time_to_collision, follow_or_plan, debug) &&
-    is_position_gap_safe(rel.position_gap, follow_or_plan, debug);
+    is_position_gap_safe(rel.position_gap, follow_or_plan) &&
+    is_time_to_collision_safe(rel.time_to_collision, follow_or_plan);
 }
 
 /**
@@ -182,8 +184,7 @@ bool is_obstacle_relationship_safe(const ObstacleRelationship & rel, bool follow
 tuple<bool, LaneConstraints> validate_lane_change(
   const int lane, bool follow_or_plan,
   const vector<int> & closest_obstacle_inds,
-  const Telemetry & telemetry,
-  const bool debug) {
+  const Telemetry & telemetry) {
 
   bool found_ahead, found_behind;
   Obstacle obstacle_ahead, obstacle_behind;
@@ -199,18 +200,13 @@ tuple<bool, LaneConstraints> validate_lane_change(
   // Determine whether the obstacle behind will allow the self to be in front of it.
   if (found_behind) {
     ObstacleRelationship rel_behind = calc_obstacle_relationship(telemetry, obstacle_behind, true);
-    if (debug) {
+    if (PP_DEBUG) {
       cout << "lane " << lane << " behind:" << endl << rel_behind;
     }
 
-    bool behind_is_safe = is_obstacle_relationship_safe(rel_behind, follow_or_plan, debug);
+    bool behind_is_safe = is_obstacle_relationship_safe(rel_behind, follow_or_plan);
 
     if (! behind_is_safe) {
-      if (debug) {
-        // Pad lines.
-        ObstacleRelationship rel_foo;
-        cout << "lane " << lane << " ahead was not validated:" << endl << rel_foo;
-      }
       LaneConstraints foo;
       return std::make_tuple(false, foo);
     }
@@ -226,11 +222,11 @@ tuple<bool, LaneConstraints> validate_lane_change(
   // At this point in code, there is someone ahead.
 
   ObstacleRelationship rel_ahead = calc_obstacle_relationship(telemetry, obstacle_ahead, true);
-  if (debug) {
+  if (PP_DEBUG) {
     cout << "lane " << lane << " ahead:" << endl << rel_ahead;
   }
 
-  bool ahead_is_safe = is_obstacle_relationship_safe(rel_ahead, follow_or_plan, debug);
+  bool ahead_is_safe = is_obstacle_relationship_safe(rel_ahead, follow_or_plan);
 
   if (ahead_is_safe) {
     return std::make_tuple(true, LaneConstraints {obstacle_ahead.now_speed, rel_ahead.time_to_collision});
@@ -247,8 +243,7 @@ tuple<bool, LaneConstraints> validate_lane_change(
 tuple<int, LaneConstraints> prepare_lane_change(
   const int current_lane,
   const vector<int> & closest_obstacle_inds,
-  const Telemetry & telemetry,
-  const bool debug) {
+  const Telemetry & telemetry) {
 
   vector<int> adjacent_lanes;
   if (current_lane == 0 || current_lane == 2) {
@@ -266,16 +261,22 @@ tuple<int, LaneConstraints> prepare_lane_change(
     bool is_safe;
     LaneConstraints constraints;
     std::tie(is_safe, constraints) = validate_lane_change(
-      adj_lane, false, closest_obstacle_inds, telemetry, debug);
+      adj_lane, false, closest_obstacle_inds, telemetry);
 
     if (is_safe &&
         constraints.time_to_collision > optimal_adj_constraints.time_to_collision) {
       optimal_adj_lane = adj_lane;
       optimal_adj_constraints = constraints;
     }
+
+    if (PP_DEBUG) {
+      cout << "---" << endl;
+    }
   }
 
-  cout << "optimal lane to change into is " << optimal_adj_lane << endl << optimal_adj_constraints;
+  if (PP_DEBUG) {
+    cout << "optimal lane to change into is " << optimal_adj_lane << endl << optimal_adj_constraints;
+  }
 
   return std::make_tuple(optimal_adj_lane, optimal_adj_constraints);
 }
@@ -290,8 +291,7 @@ tuple<int, LaneConstraints> prepare_lane_change(
 LaneConstraints follow_obstacle_ahead(
   const int target_lane,
   const vector<int> & closest_obstacle_inds,
-  const Telemetry & telemetry,
-  const bool debug) {
+  const Telemetry & telemetry) {
 
   bool obstacle_was_found;
   Obstacle obstacle;
@@ -303,27 +303,37 @@ LaneConstraints follow_obstacle_ahead(
   }
 
   ObstacleRelationship now_rel = calc_obstacle_relationship(telemetry, obstacle, false);
-  if (debug) {
+  if (PP_DEBUG) {
     cout << "following, now:" << endl << now_rel;
   }
 
-  if (! is_obstacle_relationship_safe(now_rel, true, debug)) {
+  bool now_is_safe = is_obstacle_relationship_safe(now_rel, true);
+  if (PP_DEBUG) {
+    cout << "---" << endl;
+  }
+
+  if (! now_is_safe) {
     return LaneConstraints {obstacle.now_speed, now_rel.time_to_collision};
   }
 
   ObstacleRelationship future_rel = calc_obstacle_relationship(telemetry, obstacle, true);
-  if (debug) {
+  if (PP_DEBUG) {
     cout << "following, future:" << endl << future_rel;
   }
 
-  if (! is_obstacle_relationship_safe(future_rel, true, debug)) {
+  bool future_is_safe = is_obstacle_relationship_safe(future_rel, true);
+  if (PP_DEBUG) {
+    cout << "---" << endl;
+  }
+
+  if (! future_is_safe) {
     return LaneConstraints {obstacle.now_speed, future_rel.time_to_collision};
   }
 
   return LaneConstraints {SPEED_LIMIT, MAX_DOUBLE};
 }
 
-FSM iterate_fsm(const FSM fsm, const Telemetry & telemetry, const bool debug) {
+FSM iterate_fsm(const FSM fsm, const Telemetry & telemetry) {
 
   // Use the self's current position as the reference when finding closest obstacles.
   vector<int> closest_obstacle_inds = find_closest_obstacles(telemetry.now_obstacles, telemetry.now_s);
@@ -332,7 +342,7 @@ FSM iterate_fsm(const FSM fsm, const Telemetry & telemetry, const bool debug) {
   // - adjust the target speed for the current target lane
   // - also get the cost of keeping the current target lane, in the form of time-to-collision.
   LaneConstraints following = follow_obstacle_ahead(
-    fsm.target_lane, closest_obstacle_inds, telemetry, debug);
+    fsm.target_lane, closest_obstacle_inds, telemetry);
 
   if (fsm.state == KEEP_LANE) {
     bool ahead_is_clear = following.time_to_collision == MAX_DOUBLE;
@@ -344,7 +354,7 @@ FSM iterate_fsm(const FSM fsm, const Telemetry & telemetry, const bool debug) {
     int adj_lane;
     LaneConstraints adj_constraints;
     std::tie(adj_lane, adj_constraints) = prepare_lane_change(
-      fsm.target_lane, closest_obstacle_inds, telemetry, debug);
+      fsm.target_lane, closest_obstacle_inds, telemetry);
 
     // Initiate lane change iff safe and advantageous.
     if (adj_lane != -1 &&
@@ -363,7 +373,7 @@ FSM iterate_fsm(const FSM fsm, const Telemetry & telemetry, const bool debug) {
     bool is_safe;
     LaneConstraints _;
     std::tie(is_safe, _) = validate_lane_change(
-      fsm.target_lane, true, closest_obstacle_inds, telemetry, debug);
+      fsm.target_lane, true, closest_obstacle_inds, telemetry);
 
     if (is_safe) {
       return FSM {INITIATE_LANE_CHANGE, fsm.target_lane, following.target_speed};
@@ -371,7 +381,7 @@ FSM iterate_fsm(const FSM fsm, const Telemetry & telemetry, const bool debug) {
       int original_lane = lane_index_away(fsm.target_lane, telemetry.now_d);
 
       LaneConstraints following_original_lane = follow_obstacle_ahead(
-        original_lane, closest_obstacle_inds, telemetry, debug);
+        original_lane, closest_obstacle_inds, telemetry);
 
       return FSM {ABORT_LANE_CHANGE, original_lane, following_original_lane.target_speed};
     }
@@ -421,9 +431,16 @@ tuple<vector<double>, vector<double> > generate_path(
     markers_y.push_back(end_path_y);
   }
 
-  // Add a few more sparse markers in far distance
+  // Add a few more sparse markers in far distance. This addition makes the
+  // pre-smoothened path of the markers as having a kink at each of
+  // 1) the end of the currently existing path
+  // 2) `closest_future_s_offset` beyond the end of the currently existing path.
+  // Beyond `closest_future_s_offset`, the markers follow the lane.
+  //
+  // `closest_future_s_offset` is proportional to the new speed to be executed.
+  // The gaps between markers beyond `closest_future_s_offset` are constant.
+  //
   // Pick the markers in s,d and convert them to x,y
-  // Add more points further away to make the tail end of the curve straight
   double closest_future_s_offset = std::max(
     PATHGEN_FUTURE_MARKERS_GAP / SPEED_LIMIT * end_path_speed,
     PATHGEN_FUTURE_MARKERS_GAP_MIN);
@@ -438,10 +455,11 @@ tuple<vector<double>, vector<double> > generate_path(
     markers_y.push_back(marker_xy[1]);
   }
 
-  // Transform markers to coordinate system - which I'll call p,q - such that
-  // origin is at previous path's end
-  // and p is pointing to car's forward direction at previous path's end
-  // Reuse the same vectors
+  // Transform markers to coordinate system - which I'll call p,q - such that:
+  // - origin is at previous path's end
+  // - and p is pointing to car's forward direction at previous path's end
+  //
+  // Convert within the same vectors
   for (int i = 0; i < markers_x.size(); i++) {
     double translated_x = markers_x[i] - end_path_x;
     double translated_y = markers_y[i] - end_path_y;
@@ -454,8 +472,9 @@ tuple<vector<double>, vector<double> > generate_path(
   spliner_pq.set_points(markers_x, markers_y);
 
   // Next path x,y. This is what we will output.
-  // The vector length will be greater than `previous_path_size`.
   vector<double> next_path_x(telemetry.future_path_size), next_path_y(telemetry.future_path_size);
+  next_path_x.reserve(NUM_OUTPUT_PATH_POINTS);
+  next_path_y.reserve(NUM_OUTPUT_PATH_POINTS);
 
   // Add back all previous path points
   std::copy(telemetry.future_path_x.begin(), telemetry.future_path_x.end(), next_path_x.begin());
@@ -465,10 +484,10 @@ tuple<vector<double>, vector<double> > generate_path(
   // First determine at what interval.
   double p_interval;
   {
-    // Pick an arbitrary p in the future. It should be both far enough
-    // and close enough to linearize the curvature.
-    // Because s and p coordinates are approximately equal in the short
-    // distance, simply pick the closest future s offset.
+    // Pick p at the aforementioned kink. This should be optimal for linearizing
+    // the portion of path between the two kinks.
+    // Because s and p coordinates are approximately equal in the short distance,
+    // don't bother converting from s to p.
     double target_p = closest_future_s_offset;
     double target_q = spliner_pq(target_p);
     double target_dist = sqrt(pow(target_p, 2) + pow(target_q, 2));

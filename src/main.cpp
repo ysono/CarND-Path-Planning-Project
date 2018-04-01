@@ -67,7 +67,7 @@ vector<double> getXY(double s, double d, const vector<double> &maps_s, const vec
 }
 
 int main(int argc, char* argv[]) {
-  bool debug = argc >= 2 && strcmp(argv[1], "--debug") == 0;
+  PP_DEBUG = argc >= 2 && strcmp(argv[1], "--debug") == 0;
 
   uWS::Hub h;
 
@@ -118,10 +118,7 @@ int main(int argc, char* argv[]) {
   double end_path_speed = 0;
 
   h.onMessage(
-    [&fsm,
-      &end_path_speed,
-      &sd_to_xy,
-      &debug]
+    [&fsm, &end_path_speed, &sd_to_xy]
     (uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length, uWS::OpCode opCode) {
 
     //auto sdata = string(data).substr(0, length);
@@ -172,14 +169,14 @@ int main(int argc, char* argv[]) {
 
           ////// End of unravelling telemtry data //////
 
-          if (debug) {
+          if (PP_DEBUG) {
             cout << "======" << endl << fsm;
           }
 
           vector<double> next_path_x, next_path_y;
 
           if (telemetry.future_path_size >= NUM_OUTPUT_PATH_POINTS) {
-            if (debug) {
+            if (PP_DEBUG) {
               cout << "no need to generate path points" << endl;
             }
           } else {
@@ -188,7 +185,7 @@ int main(int argc, char* argv[]) {
               telemetry.future_d = telemetry.now_d;
             }
 
-            fsm = iterate_fsm(fsm, telemetry, debug);
+            fsm = iterate_fsm(fsm, telemetry);
 
             // For all modes, adjust acceleration only.
             // We're using the same speed for all path points to be added.

@@ -21,23 +21,21 @@ constexpr double LANE_DETECTION_MARGIN_D = LANE_WIDTH / 4;
 // Lane change is considered complete when the d settles within this distance
 // from the destination lane center.
 // The whole bidirectional width of this zone is twice this margin.
-const double LANE_CHANGE_COMPLETION_MARGIN_D = LANE_WIDTH / 8;
+constexpr double LANE_CHANGE_COMPLETION_MARGIN_D = LANE_WIDTH / 8;
 
 constexpr double MAX_SAFE_POSITION_GAP_FOLLOWING = 2; // meter
-constexpr double MAX_SAFE_POSITION_GAP_PLC = 5; // meter
+constexpr double MAX_SAFE_POSITION_GAP_PLC = 4; // meter
 
 constexpr double MIN_UNSAFE_TIME_TO_COLLISION = 0; // sec
 constexpr double MAX_UNSAFE_TIME_TO_COLLISION_FOLLOWING = 1; // sec
-constexpr double MAX_UNSAFE_TIME_TO_COLLISION_PLC = 3; // sec
-
-
+constexpr double MAX_UNSAFE_TIME_TO_COLLISION_PLC = 2; // sec
 
 // DEFAULT_ACCEL == `0.5 / 2.236936`. Then the `0.5` has a unit of `mile/hour/sec`?
 // I don't know if this calculation is meaningful. But it works.
 constexpr double DEFAULT_ACCEL = .224; // meter/sec/sec
 
 constexpr double PATH_INTERVAL = 0.02; // sec
-constexpr double OUTPUT_PATH_DURATION = 1; // sec
+constexpr double OUTPUT_PATH_DURATION = 0.4; // sec
 const int NUM_OUTPUT_PATH_POINTS = ceil(OUTPUT_PATH_DURATION / PATH_INTERVAL);
 
 // Gap between markers to add beyond the existing path.
@@ -46,6 +44,8 @@ constexpr double PATHGEN_FUTURE_MARKERS_NUM = 3;
 constexpr double PATHGEN_FUTURE_MARKERS_GAP = 30; // meter
 // At low speeds, including when starting out, use the gap at 15mph.
 constexpr double PATHGEN_FUTURE_MARKERS_GAP_MIN = PATHGEN_FUTURE_MARKERS_GAP / SPEED_LIMIT * 15;
+
+extern bool PP_DEBUG;
 
 
 struct Telemetry {
@@ -100,9 +100,6 @@ inline std::ostream & operator<<(std::ostream & stream, FSM const & fsm) {
 
 /**
   * Describes constraints the self vehicle would encounter if it is to follow some lane.
-  *
-  * `time_to_collision` should be used as the cost of such decision.
-  * The larger the time, the better the cost.
   */
 struct LaneConstraints {
   double target_speed;
@@ -131,12 +128,12 @@ inline std::ostream & operator<<(std::ostream & stream, ObstacleRelationship con
 
 
 /**
-  * Returns (FSM state, target lane, target speed).
+  * Returns next FSM state.
   */
-FSM iterate_fsm(const FSM fsm, const Telemetry & telemetry, const bool debug);
+FSM iterate_fsm(const FSM fsm, const Telemetry & telemetry);
 
 /**
-  * Assigns to `next_path_x` and `next_path_y`.
+  * Returns (`next_path_x`, `next_path_y`).
   */
 std::tuple<std::vector<double>, std::vector<double> > generate_path(
   const int target_lane, const double end_path_speed, const Telemetry & telemetry,
