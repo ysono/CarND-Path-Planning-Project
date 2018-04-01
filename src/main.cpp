@@ -41,28 +41,28 @@ string hasData(string s) {
 // Transform from Frenet s,d coordinates to Cartesian x,y
 vector<double> getXY(double s, double d, const vector<double> &maps_s, const vector<double> &maps_x, const vector<double> &maps_y)
 {
-	int prev_wp = -1;
+  int prev_wp = -1;
 
-	while(s > maps_s[prev_wp+1] && (prev_wp < (int)(maps_s.size()-1) ))
-	{
-		prev_wp++;
-	}
+  while(s > maps_s[prev_wp+1] && (prev_wp < (int)(maps_s.size()-1) ))
+  {
+    prev_wp++;
+  }
 
-	int wp2 = (prev_wp+1)%maps_x.size();
+  int wp2 = (prev_wp+1)%maps_x.size();
 
-	double heading = atan2((maps_y[wp2]-maps_y[prev_wp]),(maps_x[wp2]-maps_x[prev_wp]));
-	// the x,y,s along the segment
-	double seg_s = (s-maps_s[prev_wp]);
+  double heading = atan2((maps_y[wp2]-maps_y[prev_wp]),(maps_x[wp2]-maps_x[prev_wp]));
+  // the x,y,s along the segment
+  double seg_s = (s-maps_s[prev_wp]);
 
-	double seg_x = maps_x[prev_wp]+seg_s*cos(heading);
-	double seg_y = maps_y[prev_wp]+seg_s*sin(heading);
+  double seg_x = maps_x[prev_wp]+seg_s*cos(heading);
+  double seg_y = maps_y[prev_wp]+seg_s*sin(heading);
 
-	double perp_heading = heading-pi()/2;
+  double perp_heading = heading-pi()/2;
 
-	double x = seg_x + d*cos(perp_heading);
-	double y = seg_y + d*sin(perp_heading);
+  double x = seg_x + d*cos(perp_heading);
+  double y = seg_y + d*sin(perp_heading);
 
-	return {x,y};
+  return {x,y};
 
 }
 
@@ -87,22 +87,22 @@ int main(int argc, char* argv[]) {
 
   string line;
   while (getline(in_map_, line)) {
-  	std::istringstream iss(line);
-  	double x;
-  	double y;
-  	float s;
-  	float d_x;
-  	float d_y;
-  	iss >> x;
-  	iss >> y;
-  	iss >> s;
-  	iss >> d_x;
-  	iss >> d_y;
-  	map_waypoints_x.push_back(x);
-  	map_waypoints_y.push_back(y);
-  	map_waypoints_s.push_back(s);
-  	map_waypoints_dx.push_back(d_x);
-  	map_waypoints_dy.push_back(d_y);
+    std::istringstream iss(line);
+    double x;
+    double y;
+    float s;
+    float d_x;
+    float d_y;
+    iss >> x;
+    iss >> y;
+    iss >> s;
+    iss >> d_x;
+    iss >> d_y;
+    map_waypoints_x.push_back(x);
+    map_waypoints_y.push_back(y);
+    map_waypoints_s.push_back(s);
+    map_waypoints_dx.push_back(d_x);
+    map_waypoints_dy.push_back(d_y);
   }
 
   std::function<vector<double>(double, double)> sd_to_xy =
@@ -145,25 +145,33 @@ int main(int argc, char* argv[]) {
         if (event == "telemetry") {
           // j[1] is the data JSON object
           
-        	// Main car's localization Data
-        	double car_x = j[1]["x"];
-        	double car_y = j[1]["y"];
-        	double car_s = j[1]["s"];
-        	double car_d = j[1]["d"];
-        	double car_yaw = j[1]["yaw"]; car_yaw = deg2rad(car_yaw); // deg
-        	double car_speed = j[1]["speed"]; // keep all speed vars as mph
+          Telemetry telemetry;
 
-        	// Previous path data given to the Planner
-        	auto previous_path_x = j[1]["previous_path_x"];
-        	auto previous_path_y = j[1]["previous_path_y"];
-          size_t previous_path_size = previous_path_x.size();
+          // Main car's localization Data
+          telemetry.now_x = j[1]["x"];
+          telemetry.now_y = j[1]["y"];
+          telemetry.now_s = j[1]["s"];
+          telemetry.now_d = j[1]["d"];
+          double now_yaw = j[1]["yaw"]; // deg
+          telemetry.now_yaw = deg2rad(now_yaw); // rad
+          telemetry.now_speed = j[1]["speed"]; // keep all speed vars as mph
 
-        	// Previous path's end s and d values 
-        	double end_path_s = j[1]["end_path_s"];
-        	double end_path_d = j[1]["end_path_d"];
+          // Previous path data given to the Planner
+          vector<double> future_path_x = j[1]["previous_path_x"];
+          vector<double> future_path_y = j[1]["previous_path_y"];
+          telemetry.future_path_x = future_path_x;
+          telemetry.future_path_y = future_path_y;
+          telemetry.future_path_size = future_path_x.size();
+          telemetry.future_path_duration = PATH_INTERVAL * telemetry.future_path_size;
 
-        	// Sensor Fusion Data, a list of all other cars on the same side of the road.
-        	vector<vector<double> > obstacles = j[1]["sensor_fusion"];
+          // Previous path's end s and d values 
+          telemetry.future_s = j[1]["end_path_s"];
+          telemetry.future_d = j[1]["end_path_d"];
+          telemetry.future_speed = end_path_speed;
+
+          // Sensor Fusion Data, a list of all other cars on the same side of the road.
+          vector<vector<double> > now_obstacles = j[1]["sensor_fusion"];
+          telemetry.now_obstacles = now_obstacles;
 
           ////// End of unravelling telemtry data //////
 
@@ -180,22 +188,19 @@ int main(int argc, char* argv[]) {
 
           vector<double> next_path_x, next_path_y;
 
-          if (previous_path_size >= NUM_OUTPUT_PATH_POINTS) {
+          if (telemetry.future_path_size >= NUM_OUTPUT_PATH_POINTS) {
             if (debug) {
               cout << "no need to generate path points" << endl;
             }
           } else {
-            if (previous_path_size == 0) {
-              end_path_s = car_s;
-              end_path_d = car_d;
+            if (telemetry.future_path_size == 0) {
+              telemetry.future_s = telemetry.now_s;
+              telemetry.future_d = telemetry.now_d;
             }
 
             std::tie(fsm_state, target_lane, target_speed) = iterate_fsm(
               fsm_state, target_lane, target_speed,
-              obstacles,
-              car_s, car_d, car_speed,
-              end_path_s, end_path_d, end_path_speed,
-              previous_path_size,
+              telemetry,
               debug);
             
 
@@ -211,20 +216,19 @@ int main(int argc, char* argv[]) {
             }
 
             std::tie(next_path_x, next_path_y) = generate_path(
-              car_x, car_y, car_yaw,
-              previous_path_x, previous_path_y, previous_path_size,
-              end_path_s, end_path_speed, target_lane,
+              telemetry,
+              end_path_speed, target_lane,
               sd_to_xy);
           }
 
           ////// Finished generating path //////
 
           json msgJson;
-        	msgJson["next_x"] = next_path_x;
-        	msgJson["next_y"] = next_path_y;
+          msgJson["next_x"] = next_path_x;
+          msgJson["next_y"] = next_path_y;
 
-        	auto msg = "42[\"control\","+ msgJson.dump()+"]";
-        	ws.send(msg.data(), msg.length(), uWS::OpCode::TEXT);
+          auto msg = "42[\"control\","+ msgJson.dump()+"]";
+          ws.send(msg.data(), msg.length(), uWS::OpCode::TEXT);
 
           //this_thread::sleep_for(chrono::milliseconds(1000));
         }

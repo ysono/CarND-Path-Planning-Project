@@ -22,6 +22,14 @@ int lane_index_away(int from_lane_index, double to_d) {
   }
 }
 
+/**
+  * Returns obstacle indexes of {
+  *   lane 0 ahead, lane 1 ahead, lane 2 ahead,
+  *   lane 0 behind, lane 1 behind, lane 2 behind
+  * }
+  *
+  * For each of the above, if not found, use -1.
+  */
 vector<int> find_closest_obstacles(const vector<vector<double> > & obstacles, double ref_s) {
 
   vector<int> obstacle_inds(NUM_LANES * 2, -1);
@@ -71,11 +79,17 @@ double extract_obstacle_position(const vector<double> & obstacle) {
   return obstacle[5];
 }
 
+/**
+  * Returns whether setting the given lane as the target is .... TODO
+  * 1) safe to do, and
+  * 2) advantageous compared to reference time-to-collision.
+  *
+  * Returns (target speed, time-to-collision).
+  */
 tuple<double, double> is_lane_feasible(
     const int lane,
-    const vector<vector<double> > & obstacles, const vector<int> & closest_obstacle_inds,
-    const double end_path_s, const double end_path_speed,
-    const double prev_path_duration,
+    const vector<int> & closest_obstacle_inds,
+    const Telemetry & telemetry,
     const bool debug) {
 
   int obstacle_ind_ahead = closest_obstacle_inds[lane];
@@ -88,12 +102,13 @@ tuple<double, double> is_lane_feasible(
 
   // Determine whether the obstacle behind allows the self to be in front of it.
   if (obstacle_ind_behind != -1) {
-    vector<double> obstacle_behind = obstacles[obstacle_ind_behind];
+    vector<double> obstacle_behind = telemetry.now_obstacles[obstacle_ind_behind];
     double obst_speed = extract_obstacle_speed(obstacle_behind);
-    double obst_pos_endpath = extract_obstacle_position(obstacle_behind) + obst_speed * prev_path_duration;
+    double obst_pos_endpath = extract_obstacle_position(obstacle_behind)
+      + obst_speed * telemetry.future_path_duration;
 
-    double dist_gap = end_path_s - obst_pos_endpath;
-    double speed_gap = end_path_speed - obst_speed;
+    double dist_gap = telemetry.future_s - obst_pos_endpath;
+    double speed_gap = telemetry.future_speed - obst_speed;
     double time_to_collision = -dist_gap / speed_gap;
 
     bool behind_is_ok =
@@ -123,12 +138,13 @@ tuple<double, double> is_lane_feasible(
   }
 
   // There is someone ahead.
-  vector<double> obstacle_ahead = obstacles[obstacle_ind_ahead];
+  vector<double> obstacle_ahead = telemetry.now_obstacles[obstacle_ind_ahead];
   double obst_speed = extract_obstacle_speed(obstacle_ahead);
-  double obst_pos_endpath = extract_obstacle_position(obstacle_ahead) + obst_speed * prev_path_duration;
+  double obst_pos_endpath = extract_obstacle_position(obstacle_ahead)
+    + obst_speed * telemetry.future_path_duration;
 
-  double dist_gap = obst_pos_endpath - end_path_s;
-  double speed_gap = obst_speed - end_path_speed;
+  double dist_gap = obst_pos_endpath - telemetry.future_s;
+  double speed_gap = obst_speed - telemetry.future_speed;
   double time_to_collision = -dist_gap / speed_gap;
 
   bool ahead_is_ok = 
@@ -152,11 +168,13 @@ tuple<double, double> is_lane_feasible(
   return std::make_tuple(0, -std::numeric_limits<double>::max());
 }
 
+/**
+  * Returns (target lane, target speed, time-to-collision).
+  */
 tuple<int, double, double> prepare_lane_change(
     const int target_lane, const double target_speed,
-    const vector<vector<double> > & obstacles, const vector<int> & closest_obstacle_inds,
-    const double end_path_s, const double end_path_speed,
-    const double prev_path_duration,
+    const vector<int> & closest_obstacle_inds,
+    const Telemetry & telemetry,
     const bool debug) {
 
   vector<int> adjacent_lanes; // TODO compare all time-to-collisions.
@@ -179,9 +197,8 @@ tuple<int, double, double> prepare_lane_change(
     double adj_lane_target_speed, adj_lane_time_to_collision;
     std::tie(adj_lane_target_speed, adj_lane_time_to_collision) = is_lane_feasible(
       adj_lane,
-      obstacles, closest_obstacle_inds,
-      end_path_s, end_path_speed,
-      prev_path_duration,
+      closest_obstacle_inds,
+      telemetry,
       debug);
 
     if (adj_lane_time_to_collision > optimal_time_to_collision) {
@@ -198,12 +215,23 @@ tuple<int, double, double> prepare_lane_change(
   }
 }
 
+/**
+  * Evaluates obstacle ahead in the provided target lane.
+  *
+  * Based on the obstacle's position and speed at the present _and_ at the end of
+  * the previous path, determins optimal target speed if we are to stay in the
+  * same lane.
+  *
+  * In other words, this fn calculates the cost time-to-collision of keeping lane.
+  *
+  * Also calculates the target speed if we ar eto stay in the lane.
+  *
+  * Returns (target speed, time-to-collision).
+  */
 tuple<double, double> keep_lane(
     const int target_lane,
-    const vector<vector<double> > & obstacles, const vector<int> & closest_obstacle_inds,
-    const double car_s, const double car_speed,
-    const double end_path_s, const double end_path_speed,
-    const double prev_path_duration,
+    const vector<int> & closest_obstacle_inds,
+    const Telemetry & telemetry,
     const bool debug) {
 
   int obstacle_ind_ahead = closest_obstacle_inds[target_lane];
@@ -212,12 +240,12 @@ tuple<double, double> keep_lane(
     return std::make_tuple(SPEED_LIMIT, std::numeric_limits<double>::max());
   }
 
-  vector<double> obstacle_ahead = obstacles[obstacle_ind_ahead];
+  vector<double> obstacle_ahead = telemetry.now_obstacles[obstacle_ind_ahead];
   double obst_pos_now = extract_obstacle_position(obstacle_ahead);
   double obst_speed = extract_obstacle_speed(obstacle_ahead);
 
-  double dist_gap_now = obst_pos_now - car_s;
-  double speed_gap_now = obst_speed - car_speed;
+  double dist_gap_now = obst_pos_now - telemetry.now_s;
+  double speed_gap_now = obst_speed - telemetry.now_speed;
   double time_to_collision_now = -dist_gap_now / speed_gap_now;
 
   // We need to consider obstacles that cut in front of us at a distance between
@@ -240,9 +268,9 @@ tuple<double, double> keep_lane(
     return std::make_tuple(obst_speed, time_to_collision_now);
   }
 
-  double obst_pos_endpath = obst_pos_now + obst_speed * prev_path_duration;
-  double dist_gap_endpath = obst_pos_endpath - end_path_s;
-  double speed_gap_endpath = obst_speed - end_path_speed;
+  double obst_pos_endpath = obst_pos_now + obst_speed * telemetry.future_path_duration;
+  double dist_gap_endpath = obst_pos_endpath - telemetry.future_s;
+  double speed_gap_endpath = obst_speed - telemetry.future_speed;
   double time_to_collision_endpath = -dist_gap_endpath / speed_gap_endpath;
 
   bool too_close_endpath =
@@ -265,16 +293,12 @@ tuple<double, double> keep_lane(
 
 tuple<FSM_State, int, double> iterate_fsm(
     const FSM_State fsm_state, const int target_lane, const double target_speed,
-    const vector<vector<double> > & obstacles,
-    const double car_s, const double car_d, const double car_speed,
-    const double end_path_s, const double end_path_d, const double end_path_speed,
-    const size_t previous_path_size,
+    const Telemetry & telemetry,
     const bool debug) {
 
-  double prev_path_duration = PATH_INTERVAL * previous_path_size;
 
   // Use the self's current position as the reference when finding closest obstacles.
-  vector<int> closest_obstacle_inds = find_closest_obstacles(obstacles, car_s);
+  vector<int> closest_obstacle_inds = find_closest_obstacles(telemetry.now_obstacles, telemetry.now_s);
 
   // For all FSM states,
   // 1. adjust the target speed for the current target lane
@@ -285,10 +309,8 @@ tuple<FSM_State, int, double> iterate_fsm(
   double default_target_speed, default_time_to_collision;
   std::tie(default_target_speed, default_time_to_collision) = keep_lane(
     target_lane,
-    obstacles, closest_obstacle_inds,
-    car_s, car_speed,
-    end_path_s, end_path_speed,
-    prev_path_duration,
+    closest_obstacle_inds,
+    telemetry,
     debug);
 
   if (fsm_state == KEEP_LANE) {
@@ -304,9 +326,8 @@ tuple<FSM_State, int, double> iterate_fsm(
     std::tie(alt_target_lane, alt_target_speed, alt_time_to_collision) =
       prepare_lane_change(
         target_lane, target_speed,
-        obstacles, closest_obstacle_inds,
-        end_path_s, end_path_speed,
-        prev_path_duration,
+        closest_obstacle_inds,
+        telemetry,
         debug);
 
     if (alt_time_to_collision < default_time_to_collision) {
@@ -317,7 +338,7 @@ tuple<FSM_State, int, double> iterate_fsm(
   }
 
   if (fsm_state == CHANGING_LANE) {
-    double d_error = fabs(lane_index_to_d(target_lane) - end_path_d);
+    double d_error = fabs(lane_index_to_d(target_lane) - telemetry.future_d);
     if (d_error < LANE_CHANGE_COMPLETION_MARGIN) {
       // Changing lane is done.
       return std::make_tuple(KEEP_LANE, target_lane, default_target_speed);
@@ -331,17 +352,16 @@ tuple<FSM_State, int, double> iterate_fsm(
     double _, alt_time_to_collision;
     std::tie(_, alt_time_to_collision) = is_lane_feasible(
       target_lane,
-      obstacles, closest_obstacle_inds,
-      end_path_s, end_path_speed,
-      prev_path_duration,
+      closest_obstacle_inds,
+      telemetry,
       debug);
 
     if (alt_time_to_collision < MIN_TIME_TO_COLLISION) {
       if (debug) {
         cout << "abort changing lane !!!" << endl;
       }
-      // Pass the current `car_d`, rather than the future `end_path_d`.
-      int original_target_lane = lane_index_away(target_lane, car_d);
+      // Pass the current `telemetry.now_d`, rather than the future `end_path_d`.
+      int original_target_lane = lane_index_away(target_lane, telemetry.now_d);
       return std::make_tuple(CHANGING_LANE, original_target_lane, default_target_speed);
     } else {
       return std::make_tuple(CHANGING_LANE, target_lane, default_target_speed);
@@ -352,9 +372,8 @@ tuple<FSM_State, int, double> iterate_fsm(
 }
 
 tuple<vector<double>, vector<double> > generate_path(
-    const double car_x, const double car_y, const double car_yaw,
-    const vector<double> & previous_path_x, const vector<double> & previous_path_y, const size_t previous_path_size,
-    const double end_path_s, const double end_path_speed, const int target_lane,
+    const Telemetry & telemetry,
+    const double end_path_speed, const int target_lane,
     const std::function<vector<double>(double, double)> & sd_to_xy) {
 
   // Markers for spline. Spline will go through all points defined here.
@@ -363,21 +382,21 @@ tuple<vector<double>, vector<double> > generate_path(
   double end_path_x, end_path_y, end_path_yaw;
 
   // add 2 previous points to markers
-  if (previous_path_size < 2) {
-    end_path_x = car_x;
-    end_path_y = car_y;
-    end_path_yaw = car_yaw;
+  if (telemetry.future_path_size < 2) {
+    end_path_x = telemetry.now_x;
+    end_path_y = telemetry.now_y;
+    end_path_yaw = telemetry.now_yaw;
 
-    markers_x.push_back(car_x - cos(car_yaw));
-    markers_y.push_back(car_y - sin(car_yaw));
+    markers_x.push_back(telemetry.now_x - cos(telemetry.now_yaw));
+    markers_y.push_back(telemetry.now_y - sin(telemetry.now_yaw));
 
     markers_x.push_back(end_path_x);
     markers_y.push_back(end_path_y);
   } else {
-    end_path_x = previous_path_x[previous_path_size - 1];
-    end_path_y = previous_path_y[previous_path_size - 1];
-    double penultimate_x = previous_path_x[previous_path_size - 2];
-    double penultimate_y = previous_path_y[previous_path_size - 2];
+    end_path_x = telemetry.future_path_x[telemetry.future_path_size - 1];
+    end_path_y = telemetry.future_path_y[telemetry.future_path_size - 1];
+    double penultimate_x = telemetry.future_path_x[telemetry.future_path_size - 2];
+    double penultimate_y = telemetry.future_path_y[telemetry.future_path_size - 2];
     end_path_yaw = atan2(end_path_y - penultimate_y, end_path_x - penultimate_x);
 
     markers_x.push_back(penultimate_x);
@@ -396,7 +415,7 @@ tuple<vector<double>, vector<double> > generate_path(
     double future_s_offset = future_s_offsets[i];
 
     vector<double> marker_xy = sd_to_xy(
-      end_path_s + future_s_offset,
+      telemetry.future_s + future_s_offset,
       lane_index_to_d(target_lane));
 
     markers_x.push_back(marker_xy[0]);
@@ -420,11 +439,11 @@ tuple<vector<double>, vector<double> > generate_path(
 
   // Next path x,y. This is what we will output.
   // The vector length will be greater than `previous_path_size`.
-  vector<double> next_path_x(previous_path_size), next_path_y(previous_path_size);
+  vector<double> next_path_x(telemetry.future_path_size), next_path_y(telemetry.future_path_size);
 
   // Add back all previous path points
-  std::copy(previous_path_x.begin(), previous_path_x.end(), next_path_x.begin());
-  std::copy(previous_path_y.begin(), previous_path_y.end(), next_path_y.begin());
+  std::copy(telemetry.future_path_x.begin(), telemetry.future_path_x.end(), next_path_x.begin());
+  std::copy(telemetry.future_path_y.begin(), telemetry.future_path_y.end(), next_path_y.begin());
 
   // Add newly generated path points.
   // First determine at what interval.
@@ -444,7 +463,7 @@ tuple<vector<double>, vector<double> > generate_path(
 
   // Add as many points as needed to refill the count of output path points.
   // Generate points in p,q; then transform to x,y
-  for (int i = 0; i < NUM_OUTPUT_PATH_POINTS - previous_path_size; i++) {
+  for (int i = 0; i < NUM_OUTPUT_PATH_POINTS - telemetry.future_path_size; i++) {
     
     // To avoid repeating end_path_x and end_path_y, must use `i+1`. Makes a big difference!
     double p = p_interval * (i + 1);
