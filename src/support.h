@@ -2,6 +2,7 @@
 #define SUPPORT_H
 
 #include <math.h>
+#include <iostream>
 #include <vector>
 #include <tuple>
 #include <functional>
@@ -75,21 +76,62 @@ struct FSM {
   double target_speed;
 };
 
+inline std::ostream & operator<<(std::ostream & stream, FSM const & fsm) { 
+  std::string state_str;
+  if (fsm.state == KEEP_LANE) { state_str = "KL "; }
+  if (fsm.state == PLAN_LANE_CHANGE) { state_str = "PLC"; }
+  if (fsm.state == CHANGING_LANE) { state_str = "CL "; }
+
+  stream << "fsm_state " << state_str
+    << " target_lane " << fsm.target_lane
+    << " target_speed " << fsm.target_speed << std::endl;
+  return stream;
+}
+
+/**
+  * Describes constraints if the self vehicle is to follow some lane.
+  *
+  * `time_to_collision` should be used as the cost of such decision.
+  * The larger the time, the better the cost.
+  */
+struct LaneConstraints {
+  double target_speed;
+  double time_to_collision;
+};
+
+inline std::ostream & operator<<(std::ostream & stream, LaneConstraints const & con) { 
+  stream << "target_speed      " << con.target_speed << std::endl;
+  stream << "time_to_collision " << con.time_to_collision << std::endl;
+  return stream;
+}
+
+/**
+  * Describes relationship between the self vehicle and an obstacle.
+  */
+struct ObstacleRelationship {
+  double position_gap;
+  bool is_position_gap_safe;
+  double time_to_collision;
+  bool is_time_to_collision_safe;
+};
+
+inline std::ostream & operator<<(std::ostream & stream, ObstacleRelationship const & rel) { 
+  stream << "pos  " << (rel.is_position_gap_safe ? "" : "! ") << rel.position_gap << std::endl;
+  stream << "time " << (rel.is_time_to_collision_safe ? "" : "! ") << rel.time_to_collision << std::endl;
+  return stream;
+}
+
 
 /**
   * Returns (FSM state, target lane, target speed).
   */
-FSM iterate_fsm(
-  const FSM fsm,
-  const Telemetry & telemetry,
-  const bool debug);
+FSM iterate_fsm(const FSM fsm, const Telemetry & telemetry, const bool debug);
 
 /**
   * Assigns to `next_path_x` and `next_path_y`.
   */
 std::tuple<std::vector<double>, std::vector<double> > generate_path(
-  const Telemetry & telemetry,
-  const double end_path_speed, const int target_lane,
+  const int target_lane, const double end_path_speed, const Telemetry & telemetry,
   const std::function<std::vector<double>(double, double)> & sd_to_xy);
 
 #endif

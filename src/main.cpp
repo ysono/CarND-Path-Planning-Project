@@ -173,14 +173,7 @@ int main(int argc, char* argv[]) {
           ////// End of unravelling telemtry data //////
 
           if (debug) {
-            cout << "======" << endl;
-            string mode_str;
-            if (fsm.state == KEEP_LANE) { mode_str = "KL "; }
-            if (fsm.state == PLAN_LANE_CHANGE) { mode_str = "PLC"; }
-            if (fsm.state == CHANGING_LANE) { mode_str = "CL "; }
-            cout << "fsm_state " << mode_str
-              << " target_lane " << fsm.target_lane
-              << " target_speed " << fsm.target_speed << endl;
+            cout << "======" << endl << fsm;
           }
 
           vector<double> next_path_x, next_path_y;
@@ -195,11 +188,7 @@ int main(int argc, char* argv[]) {
               telemetry.future_d = telemetry.now_d;
             }
 
-            fsm = iterate_fsm(
-              fsm,
-              telemetry,
-              debug);
-            
+            fsm = iterate_fsm(fsm, telemetry, debug);
 
             // For all modes, adjust acceleration only.
             // We're using the same speed for all path points to be added.
@@ -213,9 +202,7 @@ int main(int argc, char* argv[]) {
             }
 
             std::tie(next_path_x, next_path_y) = generate_path(
-              telemetry,
-              end_path_speed, fsm.target_lane,
-              sd_to_xy);
+              fsm.target_lane, end_path_speed, telemetry, sd_to_xy);
           }
 
           ////// Finished generating path //////
