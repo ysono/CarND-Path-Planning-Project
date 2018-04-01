@@ -22,14 +22,14 @@ const double speed_limit = 49.5; // mph
 
 const int num_lanes = 3;
 const double lane_width = 4; // meter
+const double lane_detection_buffer = lane_width / 8;
 
-const double max_time_to_collision = 1.0;
+const double lane_change_buffer = 2.5; // meter
 
-// const double keep_lane_obstacle_buffer = 30; // meter
-// const double lane_change_obstacle_buffer_ahead = 10; // meter
-// const double lane_change_obstacle_buffer_behind = 8; // meter
-
-// This value == `0.5 / 2.236936`. I don't think this calculation is meaningful. But it works.
+// If we care about avoid being rear-ended, we can make min_time_to_collision negative.
+const double min_time_to_collision = 0; // sec.
+const double max_time_to_collision = 1; // sec
+// default_accel == `0.5 / 2.236936`. I don't think this calculation is meaningful. But it works.
 const double default_accel = .224; // meter/sec/sec
 
 const double mps_to_mph = 2.236936; // 1 meter/sec equals this much mile/hour
@@ -39,7 +39,7 @@ const double output_path_duration = 1; // sec
 const int num_output_path_points = ceil(output_path_duration / path_interval);
 
 
-enum Mode {KEEP_LANE, PLAN_LANE_CHANGE};
+enum Mode {KEEP_LANE, PLAN_LANE_CHANGE,};
 
 
 // For converting back and forth between radians and degrees.
@@ -107,21 +107,19 @@ vector<int> find_closest_obstacles(const vector<vector<double> > & obstacles, do
   vector<double> closest_s_ahead(num_lanes, std::numeric_limits<double>::max());
   vector<double> closest_s_behind(num_lanes, - std::numeric_limits<double>::max());
 
-  double d_buffer = lane_width / 4;
-
   for (int obstacle_ind = 0; obstacle_ind < obstacles.size(); obstacle_ind++) {
     vector<double> obstacle = obstacles[obstacle_ind];
     double d = obstacle[6];
     double s = obstacle[5];
 
     vector<int> relevant_lanes;
-    if (d < lane_width + d_buffer) {
+    if (d < lane_width + lane_detection_buffer) {
       relevant_lanes.push_back(0);
     }
-    if (lane_width - d_buffer < d && d < lane_width * 2 + d_buffer) {
+    if (lane_width - lane_detection_buffer < d && d < lane_width * 2 + lane_detection_buffer) {
       relevant_lanes.push_back(1);
     }
-    if (lane_width * 2 - d_buffer < d) {
+    if (lane_width * 2 - lane_detection_buffer < d) {
       relevant_lanes.push_back(2);
     }
 
@@ -152,11 +150,136 @@ double extract_obstacle_position(const vector<double> & obstacle) {
 }
 
 /**
-  * Assigns target_speed and mode.
+  * Assigns `target_speed`, `target_lane`, and `mode`.
+  */
+void prepare_lane_change(
+    const vector<vector<double> > & obstacles, const vector<int> & closest_obstacle_inds,
+    const double end_path_s, const double prev_path_duration,
+    int & target_lane, Mode & mode, double & target_speed,
+    const bool debug) {
+
+  vector<int> adjacent_lanes; // in the order of preference
+  if (target_lane == 0 || target_lane == 2) {
+    adjacent_lanes = {1};
+  } else {
+    adjacent_lanes = {0, 2};
+  }
+
+  for (unsigned int temp = 0; temp < adjacent_lanes.size(); temp++) {
+    int adj_lane = adjacent_lanes[temp];
+    if (debug) {
+      cout << "adj_lane " << adj_lane << endl;
+    }
+
+    int obstacle_ind_ahead = closest_obstacle_inds[adj_lane];
+    int obstacle_ind_behind = closest_obstacle_inds[adj_lane + num_lanes];
+
+    if (obstacle_ind_ahead == -1 && obstacle_ind_behind == -1) {
+      // No one ahead or behind in the adjacent lane.
+      // Execute lane change. Go at speed limit.
+      target_speed = speed_limit;
+      target_lane = adj_lane;
+      mode = KEEP_LANE;
+      return;
+    }
+
+    // Just extracting data. No decision to change FSM is made in this `if` block.
+    bool behind_is_ok = true;
+    if (obstacle_ind_behind != -1) {
+      vector<double> obstacle_behind = obstacles[obstacle_ind_behind];
+      double obst_speed = extract_obstacle_speed(obstacle_behind);
+      double obst_pos_endpath = extract_obstacle_position(obstacle_behind) + obst_speed * prev_path_duration;
+
+      double dist_gap = end_path_s - obst_pos_endpath;
+      double speed_gap = target_speed - obst_speed;
+      double time_to_collision = -dist_gap / speed_gap;
+
+      behind_is_ok =
+        // speed_gap > 0 &&
+        dist_gap > lane_change_buffer &&
+        (time_to_collision < min_time_to_collision ||
+          time_to_collision > max_time_to_collision);
+
+      if (debug) {
+        cout << "speed_gap "
+          << (speed_gap > 0 ? "" : "! ")
+          << speed_gap << endl;
+        cout << "v dist_gap "
+          << (dist_gap > lane_change_buffer ? "" : "! ")
+          << dist_gap << endl;
+        cout << "v time_to_collision "
+          << (time_to_collision > max_time_to_collision ? "" : "! ")
+          << time_to_collision << endl;
+      }
+    }
+
+    if (obstacle_ind_ahead == -1) {
+      // No one ahead. By logic, there is someone behind.
+
+      if (behind_is_ok) {
+        // Execute lane change. Go at speed limit.
+        target_speed = speed_limit;
+        target_lane = adj_lane;
+        mode = KEEP_LANE;
+        return;
+      }
+
+      // Evaluate other lanes.
+      continue;
+    }
+
+    // By logic, there is someone ahead.
+    bool ahead_is_ok;
+    double obst_ahead_speed;
+    {
+      vector<double> obstacle_ahead = obstacles[obstacle_ind_ahead];
+      double obst_speed = extract_obstacle_speed(obstacle_ahead);
+      double obst_pos_endpath = extract_obstacle_position(obstacle_ahead) + obst_speed * prev_path_duration;
+
+      double dist_gap = obst_pos_endpath - end_path_s;
+      double speed_gap = obst_speed - target_speed;
+      double time_to_collision = -dist_gap / speed_gap;
+
+      ahead_is_ok =
+        // speed_gap > 0 &&
+        dist_gap > lane_change_buffer &&
+        (time_to_collision < min_time_to_collision ||
+          time_to_collision > max_time_to_collision);
+
+      obst_ahead_speed = obst_speed;
+
+      if (debug) {
+        cout << "speed_gap "
+          << (speed_gap > 0 ? "" : "! ")
+          << speed_gap << endl;
+        cout << "^ dist_gap "
+          << (dist_gap > lane_change_buffer ? "" : "! ")
+          << dist_gap << endl;
+        cout << "^ time_to_collision "
+          << (time_to_collision > max_time_to_collision ? "" : "! ")
+          << time_to_collision << endl;
+      }
+    }
+
+    if (ahead_is_ok && behind_is_ok) {
+      // Execute lane change. Go at speed of obstacle ahead.
+      target_speed = obst_ahead_speed;
+      target_lane = adj_lane;
+      mode = KEEP_LANE;
+      return;
+    }
+
+    // Try other lanes.
+
+  } // end of `for each lane in adjacent_lanes`
+}
+
+/**
+  * Assigns `target_speed` and `mode`.
   */
 void keep_lane(
     const int target_lane,
-    const vector<vector<double> > obstacles, const vector<int> closest_obstacle_inds,
+    const vector<vector<double> > & obstacles, const vector<int> & closest_obstacle_inds,
     const double car_s, const double car_speed,
     const double end_path_s, const double end_path_speed,
     const double prev_path_duration,
@@ -179,18 +302,23 @@ void keep_lane(
   double speed_gap_now = obst_speed - car_speed;
   double time_to_collision_now = -dist_gap_now / speed_gap_now;
 
-  bool too_close_now = /*time_to_collision_now > 0 && */time_to_collision_now < max_time_to_collision;
+  bool too_close_now =
+    time_to_collision_now > min_time_to_collision &&
+    time_to_collision_now < max_time_to_collision;
 
   if (debug) {
-    cout << "^ time_to_collision_now " << (too_close_now ? "! " : "") << time_to_collision_now << endl;
+    cout << "^ time_to_collision_now "
+      << (too_close_now ? "! " : "")
+      << time_to_collision_now << endl;
     if (too_close_now) {
+      // Keep the num of rows output by this fn the same.
       cout << "^ time_to_collision_endpath -----" << endl;
     }
   }
 
   if (too_close_now) {
     target_speed = obst_speed;
-    // mode = PLAN_LANE_CHANGE;
+    mode = PLAN_LANE_CHANGE;
     return;
   }
 
@@ -199,15 +327,19 @@ void keep_lane(
   double speed_gap_endpath = obst_speed - end_path_speed;
   double time_to_collision_endpath = -dist_gap_endpath / speed_gap_endpath;
 
-  bool too_close_endpath = /*time_to_collision_now > 0 &&*/ time_to_collision_endpath < max_time_to_collision;
+  bool too_close_endpath =
+    time_to_collision_now > min_time_to_collision &&
+    time_to_collision_endpath < max_time_to_collision;
 
   if (debug) {
-    cout << "^ time_to_collision_endpath " << (too_close_endpath ? "! " : "") << time_to_collision_endpath << endl;
+    cout << "^ time_to_collision_endpath "
+      << (too_close_endpath ? "! " : "")
+      << time_to_collision_endpath << endl;
   }
 
   if (too_close_endpath) {
     target_speed = obst_speed;
-    // mode = PLAN_LANE_CHANGE;
+    mode = PLAN_LANE_CHANGE;
     return;
   }
 
@@ -316,134 +448,7 @@ int main(int argc, char* argv[]) {
           // Use the self's current position as the reference when finding closest obstacles.
           vector<int> closest_obstacle_inds = find_closest_obstacles(obstacles, car_s);
 
-          // This `mode` block can assign `target_speed`, `target_lane` and `mode`.
-          if (mode == PLAN_LANE_CHANGE) {
-            vector<int> adjacent_lanes; // in the order of preference
-            if (target_lane == 0 || target_lane == 2) {
-              adjacent_lanes = {1};
-            } else {
-              adjacent_lanes = {0, 2};
-            }
-
-            for (unsigned int temp = 0; temp < adjacent_lanes.size(); temp++) {
-              int adj_lane = adjacent_lanes[temp];
-              if (debug) {
-                cout << "adj_lane " << adj_lane << endl;
-              }
-
-              int obstacle_ind_ahead = closest_obstacle_inds[adj_lane];
-              int obstacle_ind_behind = closest_obstacle_inds[adj_lane + num_lanes];
-
-              // No one ahead or behind in the adjacent lane.
-              // Execute lane change. Go at speed limit.
-              if (obstacle_ind_ahead == -1 && obstacle_ind_behind == -1) {
-                target_speed = speed_limit;
-                target_lane = adj_lane;
-                mode = KEEP_LANE;
-
-                // Don't evaluate other lanes.
-                break;
-              }
-
-              // Just extracting data. No FSM change is made in this `if` block.
-              bool behind_is_ok = true;
-              if (obstacle_ind_behind != -1) {
-                vector<double> obstacle_behind = obstacles[obstacle_ind_behind];
-                double obst_speed = extract_obstacle_speed(obstacle_behind);
-                double obst_pos_endpath = extract_obstacle_position(obstacle_behind) + obst_speed * prev_path_duration;
-
-                double speed_gap = target_speed - obst_speed;
-                double dist_gap = end_path_s - obst_pos_endpath;
-                double time_to_collision = dist_gap / speed_gap;
-
-                behind_is_ok = time_to_collision > 1.0;
-
-                // bool dist_gap_ok = dist_gap > lane_change_obstacle_buffer_behind;
-                // bool speed_gap_ok = speed_gap > 0;
-
-                // // If there is enough distance gap, disregard speed gap.
-                // behind_is_ok = dist_gap_ok || speed_gap_ok;
-
-                if (debug) {
-                  // cout << "v speed gap " << (speed_gap_ok ? "" : "! ") << speed_gap << endl;
-                  // cout << "v dist gap " << (dist_gap_ok ? "" : "! ") << dist_gap << endl;
-                  cout << "v time_to_collision " << (behind_is_ok ? "" : "! ") << time_to_collision << endl;
-                }
-              }
-
-              if (obstacle_ind_ahead == -1) {
-                // No one ahead. By logic, there is someone behind.
-
-                if (behind_is_ok) {
-                  // Execute lane change. Go at speed limit.
-                  target_speed = speed_limit;
-                  target_lane = adj_lane;
-                  mode = KEEP_LANE;
-
-                  // Don't evaluate other lanes.
-                  break;
-                } else {
-                  // Evaluate other lanes.
-                  continue;
-                }
-              }
-
-              // By logic, there is someone ahead.
-              bool ahead_is_ok;
-              double speed_ahead;
-              {
-                vector<double> obstacle_ahead = obstacles[obstacle_ind_ahead];
-                double obst_speed = extract_obstacle_speed(obstacle_ahead);
-                double obst_pos_endpath = extract_obstacle_position(obstacle_ahead) + obst_speed * prev_path_duration;
-
-                double speed_gap = obst_speed - target_speed;
-                double dist_gap = obst_pos_endpath - end_path_s;
-                double time_to_collision = dist_gap / speed_gap;
-
-                ahead_is_ok = time_to_collision > 1.0;
-
-                // speed_gap_ahead_is_ok = speed_gap > 0;
-                // dist_gap_ahead_is_ok = dist_gap > lane_change_obstacle_buffer_ahead;
-
-                // ahead_is_ok =
-                //   dist_gap > lane_change_obstacle_buffer_ahead * 1.5 ||
-                //   (
-                //     dist_gap > lane_change_obstacle_buffer_ahead &&
-                //     speed_gap > 0
-                //   );
-
-                speed_ahead = obst_speed;
-
-                if (debug) {
-                  // cout << "^ speed gap " << (speed_gap_ahead_is_ok ? "" : "! ") << speed_gap << endl;
-                  // cout << "^ dist gap " << (dist_gap_ahead_is_ok ? "" : "! ") << dist_gap << endl;
-                  cout << "^ time_to_collision " << (ahead_is_ok ? "" : "! ") << time_to_collision << endl;
-                }
-              }
-
-              if (ahead_is_ok && behind_is_ok) {
-                // Execute lane change. Go at speed of obstacle ahead.
-                target_speed = speed_ahead;
-                target_lane = adj_lane;
-                mode = KEEP_LANE;
-
-                // Don't evaluate other lanes.
-                break;
-              }
-
-              // Try other lanes. Do not `break` here.
-
-            } // end of `for each lane in adjacent_lanes`
-          } // end of `if (mode == PLAN_LANE_CHANGE)`
-
-          // TODO restore the if condition? If keeping, move up.
-          // else if (mode == KEEP_LANE) {
-            // Set target_speed. Do not set target_lane.
-            // if (closest_obstacle_inds[target_lane] == -1) {
-            //   target_speed = speed_limit;
-            // } else {
-
-
+          if (mode == KEEP_LANE) {
             keep_lane(
               target_lane,
               obstacles, closest_obstacle_inds,
@@ -452,11 +457,13 @@ int main(int argc, char* argv[]) {
               prev_path_duration,
               target_speed, mode,
               debug);
-            {
-
-            }
-            // }
-          // }
+          } else if (mode == PLAN_LANE_CHANGE) {
+            prepare_lane_change(
+              obstacles, closest_obstacle_inds,
+              end_path_s, prev_path_duration,
+              target_lane, mode, target_speed,
+              debug);
+          }
 
           // For all modes, adjust acceleration only.
           // We're using the same speed for all path points to be added.
@@ -470,7 +477,10 @@ int main(int argc, char* argv[]) {
           }
 
           if (debug) {
-            cout << "mode " << mode
+            string mode_str;
+            if (mode == KEEP_LANE) { mode_str = "KL "; }
+            if (mode == PLAN_LANE_CHANGE) { mode_str = "PLC"; }
+            cout << "mode " << mode_str
               << " target_lane " << target_lane
               << " target_speed " << target_speed << endl;
           }
