@@ -111,18 +111,21 @@ int main(int argc, char* argv[]) {
     return getXY(s, d, map_waypoints_s, map_waypoints_x, map_waypoints_y);
   };
 
-  Mode mode = KEEP_LANE;
-  double target_speed = speed_limit;
+  // The 3 stateful properties of the FSM.
+  FSM_State fsm_state = KEEP_LANE;
   int target_lane = 1;
-  double end_path_speed = 0; // Telemetry doesn't provide this, so remember.
+  double target_speed = SPEED_LIMIT;
+
+  // A requried property of the previously planned path that's not retained and
+  // provided by the simulator.
+  double end_path_speed = 0;
 
   h.onMessage(
-    [&mode, &target_speed, &target_lane,      // three states of FSM
-      &end_path_speed,                        // non-provided telemetry value
+    [&fsm_state, &target_lane, &target_speed,
+      &end_path_speed,
       &sd_to_xy,
       &debug]
-    (uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length,
-                     uWS::OpCode opCode) {
+    (uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length, uWS::OpCode opCode) {
 
     //auto sdata = string(data).substr(0, length);
     //cout << sdata << endl;
@@ -148,7 +151,7 @@ int main(int argc, char* argv[]) {
         	double car_s = j[1]["s"];
         	double car_d = j[1]["d"];
         	double car_yaw = j[1]["yaw"]; car_yaw = deg2rad(car_yaw); // deg
-        	double car_speed = j[1]["speed"];
+        	double car_speed = j[1]["speed"]; // keep all speed vars as mph
 
         	// Previous path data given to the Planner
         	auto previous_path_x = j[1]["previous_path_x"];
@@ -162,112 +165,59 @@ int main(int argc, char* argv[]) {
         	// Sensor Fusion Data, a list of all other cars on the same side of the road.
         	vector<vector<double> > obstacles = j[1]["sensor_fusion"];
 
-          ////// Begin finite state machine logic //////
-
-          if (previous_path_size == 0) {
-            end_path_s = car_s;
-          }
-
-          double prev_path_duration = path_interval * previous_path_size;
-
-          // Use the self's current position as the reference when finding closest obstacles.
-          vector<int> closest_obstacle_inds = find_closest_obstacles(obstacles, car_s);
-
-          // For all modes.
-          double time_to_collision;
-          std::tie(target_speed, time_to_collision) = keep_lane(
-            target_lane,
-            obstacles, closest_obstacle_inds,
-            car_s, car_speed,
-            end_path_s, end_path_speed,
-            prev_path_duration,
-            debug);
-
-          if (mode == KEEP_LANE) {
-            bool recommend_lane_change = target_speed < speed_limit;
-            if (recommend_lane_change) {
-              mode = PLAN_LANE_CHANGE;
-            }
-          } else if (mode == CHANGING_LANE) {
-
-            double d_error = fabs(lane_index_to_d(target_lane) - end_path_d);
-            if (d_error < lane_change_completion_margin) {
-              mode = KEEP_LANE;
-            } else {
-
-              // Use a non-optimal reference time-to-collision of `-1`.
-              bool is_lane_change_safe;
-              double _;
-              std::tie(is_lane_change_safe, _) = is_lane_optimal(
-                target_lane,
-                obstacles, closest_obstacle_inds,
-                end_path_s, end_path_speed, prev_path_duration,
-                -1,
-                debug);
-              if (! is_lane_change_safe) {
-                // I believe this happens when the obstacle in the lane to change
-                // to behind the self either
-                // - came from the same lane and accelerated
-                // - came from another lane
-                // Either way, the presence of this obstacle behind must not
-                // have been accounted for when originally planning the current
-                // lane change.
-
-                // Pass the current position in d, rather than d at the pathend.
-                target_lane = lane_index_away(target_lane, car_d);
-
-                // Not assigning `target_speed`. Let the next iteration handle it.
-              }
-            }
-
-          } // end `if mode == CHANGING_LANE`
-
-          if (mode == PLAN_LANE_CHANGE) {
-            // Time to collision is the cost function for choosing between
-            // staying with PLAN_LANE_CHANGE and changing to CHANGING_LANE.
-
-            bool is_lane_change_ready;
-            std::tie(is_lane_change_ready, target_lane, target_speed) = prepare_lane_change(
-              target_lane, target_speed,
-              obstacles, closest_obstacle_inds,
-              end_path_s, end_path_speed, prev_path_duration,
-              time_to_collision,
-              debug);
-
-            if (is_lane_change_ready) {
-              mode = CHANGING_LANE;
-            }
-          }
-
-          // For all modes, adjust acceleration only.
-          // We're using the same speed for all path points to be added.
-          // Although it would be more effective to use different speeds for
-          // points to be added, in practice it should make little difference
-          // becuase we rarely have to generate more than 1 to 3 points.
-          if (end_path_speed < target_speed) {
-            end_path_speed += default_accel;
-          } else {
-            end_path_speed -= default_accel;
-          }
+          ////// End of unravelling telemtry data //////
 
           if (debug) {
+            cout << "======" << endl;
             string mode_str;
-            if (mode == KEEP_LANE) { mode_str = "KL "; }
-            if (mode == PLAN_LANE_CHANGE) { mode_str = "PLC"; }
-            if (mode == CHANGING_LANE) { mode_str = "CL "; }
-            cout << "mode " << mode_str
+            if (fsm_state == KEEP_LANE) { mode_str = "KL "; }
+            if (fsm_state == PLAN_LANE_CHANGE) { mode_str = "PLC"; }
+            if (fsm_state == CHANGING_LANE) { mode_str = "CL "; }
+            cout << "fsm_state " << mode_str
               << " target_lane " << target_lane
               << " target_speed " << target_speed << endl;
           }
 
-          ////// End finite state machine logic //////
-
           vector<double> next_path_x, next_path_y;
-          std::tie(next_path_x, next_path_y) = generate_path(
-            car_x, car_y, car_yaw,
-            previous_path_x, previous_path_y, previous_path_size,
-            end_path_s, end_path_speed, target_lane,
-            sd_to_xy);
+
+          if (previous_path_size >= NUM_OUTPUT_PATH_POINTS) {
+            if (debug) {
+              cout << "no need to generate path points" << endl;
+            }
+          } else {
+            if (previous_path_size == 0) {
+              end_path_s = car_s;
+              end_path_d = car_d;
+            }
+
+            std::tie(fsm_state, target_lane, target_speed) = iterate_fsm(
+              fsm_state, target_lane, target_speed,
+              obstacles,
+              car_s, car_d, car_speed,
+              end_path_s, end_path_d, end_path_speed,
+              previous_path_size,
+              debug);
+            
+
+            // For all modes, adjust acceleration only.
+            // We're using the same speed for all path points to be added.
+            // Although it would be more effective to use different speeds for
+            // points to be added, in practice it should make little difference
+            // becuase we rarely have to generate more than 1 to 3 points.
+            if (end_path_speed < target_speed) {
+              end_path_speed += DEFAULT_ACCEL;
+            } else {
+              end_path_speed -= DEFAULT_ACCEL;
+            }
+
+            std::tie(next_path_x, next_path_y) = generate_path(
+              car_x, car_y, car_yaw,
+              previous_path_x, previous_path_y, previous_path_size,
+              end_path_s, end_path_speed, target_lane,
+              sd_to_xy);
+          }
+
+          ////// Finished generating path //////
 
           json msgJson;
         	msgJson["next_x"] = next_path_x;
