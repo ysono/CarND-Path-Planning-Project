@@ -69,14 +69,15 @@ vector<int> find_closest_obstacles(const vector<vector<double> > & obstacles, do
   return obstacle_inds;
 }
 
-double extract_obstacle_speed(const vector<double> & obstacle) {
-  double vx = obstacle[3];
-  double vy = obstacle[4];
-  return sqrt(pow(vx, 2) + pow(vy, 2));
-}
-
-double extract_obstacle_position(const vector<double> & obstacle) {
-  return obstacle[5];
+Obstacle obstacle_vector_to_struct(const vector <double> & vec) {
+  Obstacle obstacle;
+  obstacle.id = vec[0];
+  obstacle.now_x = vec[1];
+  obstacle.now_y = vec[2];
+  obstacle.now_speed = sqrt(pow(vec[3], 2) + pow(vec[4], 2));
+  obstacle.now_s = vec[5];
+  obstacle.now_d = vec[6];
+  return obstacle;
 }
 
 /**
@@ -102,9 +103,10 @@ tuple<double, double> is_lane_feasible(
 
   // Determine whether the obstacle behind allows the self to be in front of it.
   if (obstacle_ind_behind != -1) {
-    vector<double> obstacle_behind = telemetry.now_obstacles[obstacle_ind_behind];
-    double obst_speed = extract_obstacle_speed(obstacle_behind);
-    double obst_pos_endpath = extract_obstacle_position(obstacle_behind)
+    Obstacle obstacle_behind = obstacle_vector_to_struct(
+      telemetry.now_obstacles[obstacle_ind_behind]);
+    double obst_speed = obstacle_behind.now_speed;
+    double obst_pos_endpath = obstacle_behind.now_s
       + obst_speed * telemetry.future_path_duration;
 
     double dist_gap = telemetry.future_s - obst_pos_endpath;
@@ -138,9 +140,10 @@ tuple<double, double> is_lane_feasible(
   }
 
   // There is someone ahead.
-  vector<double> obstacle_ahead = telemetry.now_obstacles[obstacle_ind_ahead];
-  double obst_speed = extract_obstacle_speed(obstacle_ahead);
-  double obst_pos_endpath = extract_obstacle_position(obstacle_ahead)
+  Obstacle obstacle_ahead = obstacle_vector_to_struct(
+    telemetry.now_obstacles[obstacle_ind_ahead]);
+  double obst_speed = obstacle_ahead.now_speed;
+  double obst_pos_endpath = obstacle_ahead.now_s
     + obst_speed * telemetry.future_path_duration;
 
   double dist_gap = obst_pos_endpath - telemetry.future_s;
@@ -240,9 +243,10 @@ tuple<double, double> keep_lane(
     return std::make_tuple(SPEED_LIMIT, std::numeric_limits<double>::max());
   }
 
-  vector<double> obstacle_ahead = telemetry.now_obstacles[obstacle_ind_ahead];
-  double obst_pos_now = extract_obstacle_position(obstacle_ahead);
-  double obst_speed = extract_obstacle_speed(obstacle_ahead);
+  Obstacle obstacle_ahead = obstacle_vector_to_struct(
+    telemetry.now_obstacles[obstacle_ind_ahead]);
+  double obst_pos_now = obstacle_ahead.now_s;
+  double obst_speed = obstacle_ahead.now_speed;
 
   double dist_gap_now = obst_pos_now - telemetry.now_s;
   double speed_gap_now = obst_speed - telemetry.now_speed;

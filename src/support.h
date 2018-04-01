@@ -56,6 +56,15 @@ struct Telemetry {
   std::vector<std::vector<double> > now_obstacles;
 };
 
+struct Obstacle {
+  double id;
+  double now_x;
+  double now_y;
+  double now_speed;
+  double now_s;
+  double now_d;
+};
+
 enum FSM_State {KEEP_LANE, PLAN_LANE_CHANGE, CHANGING_LANE};
 
 
