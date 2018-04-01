@@ -141,7 +141,7 @@ bool is_position_gap_safe(double position_gap, bool follow_or_plan) {
   bool is_safe = position_gap > min_safe;
   if (PP_DEBUG) {
     cout << "position gap is " << (is_safe ? "" : "NOT ") << "safe "
-      << min_safe << ' ' << position_gap << endl;
+      << min_safe << " vs " << position_gap << endl;
   }
   return is_safe;
 }
@@ -155,7 +155,7 @@ bool is_time_to_collision_safe(double time_to_collision, bool follow_or_plan) {
     time_to_collision > max_unsafe;
   if (PP_DEBUG) {
     cout << "time to collision is " << (is_safe ? "" : "NOT ") << "safe "
-      << max_unsafe << ' ' << time_to_collision << endl;
+      << max_unsafe << " vs " << time_to_collision << endl;
   }
   return is_safe;
 }
@@ -258,6 +258,9 @@ tuple<int, LaneConstraints> prepare_lane_change(
   for (unsigned int temp = 0; temp < adjacent_lanes.size(); temp++) {
     int adj_lane = adjacent_lanes[temp];
 
+    // Check whether safe to follow, using constraints that are more strict
+    // than those for following. We want to make sure it's much safer than
+    // the precondition for following.
     bool is_safe;
     LaneConstraints constraints;
     std::tie(is_safe, constraints) = validate_lane_change(
@@ -285,8 +288,10 @@ tuple<int, LaneConstraints> prepare_lane_change(
   * Evaluates the self's relationship with the object ahead in the target lane,
   * at the present time and, if necessary, in the future.
   * Evaluating the present-time relationship is necessary because an obstacle
-  * may cut into self's lane at a closer proximity than the self's future path end.
-  * This does not look behind.
+  * may cut into self's lane at a closer proximity than self's future position
+  * (at end of the existing path).
+  *
+  * This function does not check behind.
   */
 LaneConstraints follow_obstacle_ahead(
   const int target_lane,
@@ -340,7 +345,7 @@ FSM iterate_fsm(const FSM fsm, const Telemetry & telemetry) {
 
   // For all FSM states,
   // - adjust the target speed for the current target lane
-  // - also get the cost of keeping the current target lane, in the form of time-to-collision.
+  // - also get the cost of keeping the current target lane, in the form of time_to_collision.
   LaneConstraints following = follow_obstacle_ahead(
     fsm.target_lane, closest_obstacle_inds, telemetry);
 
@@ -356,7 +361,7 @@ FSM iterate_fsm(const FSM fsm, const Telemetry & telemetry) {
     std::tie(adj_lane, adj_constraints) = prepare_lane_change(
       fsm.target_lane, closest_obstacle_inds, telemetry);
 
-    // Initiate lane change iff safe and advantageous.
+    // Initiate lane change iff safe _and_ advantageous.
     if (adj_lane != -1 &&
         adj_constraints.time_to_collision > following.time_to_collision) {
       return FSM {INITIATE_LANE_CHANGE, adj_lane, adj_constraints.target_speed};
@@ -370,6 +375,14 @@ FSM iterate_fsm(const FSM fsm, const Telemetry & telemetry) {
       return FSM {KEEP_LANE, fsm.target_lane, following.target_speed};
     }
 
+    // Check whether safe to follow in the new lane. This uses more relaxed
+    // constraints than those for planning lane change -- same constraints as
+    // for the regular following.
+    //
+    // The check ahead is potentially redundant with the check done by
+    // `follow_obstacle_ahead`. But `follow_obstacle_ahead` does not necessarily
+    // check the future, so for code simplicity, check ahead here.
+    // Checking behind is not redundant.
     bool is_safe;
     LaneConstraints _;
     std::tie(is_safe, _) = validate_lane_change(
@@ -438,7 +451,9 @@ tuple<vector<double>, vector<double> > generate_path(
   // Beyond `closest_future_s_offset`, the markers follow the lane.
   //
   // `closest_future_s_offset` is proportional to the new speed to be executed.
-  // The gaps between markers beyond `closest_future_s_offset` are constant.
+  // It's critical that this is proportional, so that in the event of aborting,
+  // the `d` of the path quickly returns to the original lane.
+  // However, the gaps between markers beyond `closest_future_s_offset` are constant.
   //
   // Pick the markers in s,d and convert them to x,y
   double closest_future_s_offset = std::max(
