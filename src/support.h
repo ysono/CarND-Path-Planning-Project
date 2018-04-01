@@ -15,19 +15,22 @@ constexpr double SPEED_LIMIT = 49.5; // mph
 
 constexpr int NUM_LANES = 3;
 constexpr double LANE_WIDTH = 4; // meter
-// To consider obstacles that are in process of changing lanes, us this buffer.
-constexpr double LANE_DETECTION_BUFFER_D = LANE_WIDTH / 4;
+// Detection of obstacles in a given lane includes obstacles outside this lane
+// by this much margin.
+constexpr double LANE_DETECTION_MARGIN_D = LANE_WIDTH / 4;
 // Lane change is considered complete when the d settles within this distance
-// from the new lane center. The whole width is twice this margin.
+// from the destination lane center.
+// The whole bidirectional width of this zone is twice this margin.
 const double LANE_CHANGE_COMPLETION_MARGIN_D = LANE_WIDTH / 8;
 
-// Min distance, ahead and behind, required as a precondition for lane change.
-const double LANE_CHANGE_BUFFER_S_DURING_PLANNING = 4; // meter
-const double LANE_CHANGE_BUFFER_S_DURING_INITIATION = 3; // meter
+constexpr double MAX_SAFE_POSITION_GAP_FOLLOWING = 2; // meter
+constexpr double MAX_SAFE_POSITION_GAP_PLC = 5; // meter
 
-// The min/max bounds of time-to-collision, inside which it is considered to be dangerous.
-const double MIN_UNSAFE_TIME_TO_COLLISION = 0; // sec
-const double MAX_UNSAFE_TIME_TO_COLLISION = 1; // sec
+constexpr double MIN_UNSAFE_TIME_TO_COLLISION = 0; // sec
+constexpr double MAX_UNSAFE_TIME_TO_COLLISION_FOLLOWING = 1; // sec
+constexpr double MAX_UNSAFE_TIME_TO_COLLISION_PLC = 3; // sec
+
+
 
 // DEFAULT_ACCEL == `0.5 / 2.236936`. Then the `0.5` has a unit of `mile/hour/sec`?
 // I don't know if this calculation is meaningful. But it works.

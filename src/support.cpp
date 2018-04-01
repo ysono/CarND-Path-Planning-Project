@@ -47,14 +47,17 @@ vector<int> find_closest_obstacles(const vector<vector<double> > & obstacles, do
     double d = obstacle[6];
     double s = obstacle[5];
 
+    // For each lane, include obstacles outside the lane by margin of
+    // `LANE_DETECTION_MARGIN_D`. We do this in order to detect obstacles in
+    // process of changing its lane.
     vector<int> relevant_lanes;
-    if (d < LANE_WIDTH + LANE_DETECTION_BUFFER_D) {
+    if (d < LANE_WIDTH + LANE_DETECTION_MARGIN_D) {
       relevant_lanes.push_back(0);
     }
-    if (LANE_WIDTH - LANE_DETECTION_BUFFER_D < d && d < LANE_WIDTH * 2 + LANE_DETECTION_BUFFER_D) {
+    if (LANE_WIDTH - LANE_DETECTION_MARGIN_D < d && d < LANE_WIDTH * 2 + LANE_DETECTION_MARGIN_D) {
       relevant_lanes.push_back(1);
     }
-    if (LANE_WIDTH * 2 - LANE_DETECTION_BUFFER_D < d) {
+    if (LANE_WIDTH * 2 - LANE_DETECTION_MARGIN_D < d) {
       relevant_lanes.push_back(2);
     }
 
@@ -129,14 +132,47 @@ ObstacleRelationship calc_obstacle_relationship(
   return ObstacleRelationship {abs_pos_gap, time_to_collision};
 }
 
-bool is_time_to_collision_safe(double time_to_collision) {
-  return
+bool is_time_to_collision_safe(double time_to_collision, bool follow_or_plan, bool debug) {
+  double max_unsafe = follow_or_plan ?
+    MAX_UNSAFE_TIME_TO_COLLISION_FOLLOWING :
+    MAX_UNSAFE_TIME_TO_COLLISION_PLC;
+  bool is_safe =
     time_to_collision < MIN_UNSAFE_TIME_TO_COLLISION ||
-    time_to_collision > MAX_UNSAFE_TIME_TO_COLLISION;
+    time_to_collision > max_unsafe;
+  if (debug) {
+    cout << "time to collision is " << (is_safe ? "" : "NOT ") << "safe "
+      << max_unsafe << ' ' << time_to_collision << endl;
+  }
+  return is_safe;
+}
+
+bool is_position_gap_safe(double position_gap, bool follow_or_plan, bool debug) {
+  double min_safe = follow_or_plan ?
+    MAX_SAFE_POSITION_GAP_FOLLOWING :
+    MAX_SAFE_POSITION_GAP_PLC;
+  bool is_safe = position_gap > min_safe;
+  if (debug) {
+    cout << "position gap is " << (is_safe ? "" : "NOT ") << "safe "
+      << min_safe << ' ' << position_gap << endl;
+  }
+  return is_safe;
+}
+
+/**
+  * `follow_or_plan` is:
+  * - true if the purpose of validation is to follow
+  * - false if the purpose is theoretical evaluation about whether lane change is possible
+  */
+bool is_obstacle_relationship_safe(const ObstacleRelationship & rel, bool follow_or_plan, bool debug) {
+  return
+    is_time_to_collision_safe(rel.time_to_collision, follow_or_plan, debug) &&
+    is_position_gap_safe(rel.position_gap, follow_or_plan, debug);
 }
 
 /**
   * Returns (whether safe, constraints) if the self is to change into the given lane.
+  *
+  * Looks ahead and behind.
   *
   * Note, Detection of the closest object in each lane should have used a buffer
   * to include obstacles that are coming in from 2 lanes away. So this function
@@ -144,7 +180,7 @@ bool is_time_to_collision_safe(double time_to_collision) {
   * obstacles from 2 lanes away.
   */
 tuple<bool, LaneConstraints> validate_lane_change(
-  const int lane, double position_gap_threshold,
+  const int lane, bool follow_or_plan,
   const vector<int> & closest_obstacle_inds,
   const Telemetry & telemetry,
   const bool debug) {
@@ -167,9 +203,7 @@ tuple<bool, LaneConstraints> validate_lane_change(
       cout << "lane " << lane << " behind:" << endl << rel_behind;
     }
 
-    bool behind_is_safe =
-      is_time_to_collision_safe(rel_behind.time_to_collision) &&
-      rel_behind.position_gap > position_gap_threshold;
+    bool behind_is_safe = is_obstacle_relationship_safe(rel_behind, follow_or_plan, debug);
 
     if (! behind_is_safe) {
       if (debug) {
@@ -196,9 +230,7 @@ tuple<bool, LaneConstraints> validate_lane_change(
     cout << "lane " << lane << " ahead:" << endl << rel_ahead;
   }
 
-  bool ahead_is_safe =
-    is_time_to_collision_safe(rel_ahead.time_to_collision) &&
-    rel_ahead.position_gap > position_gap_threshold;
+  bool ahead_is_safe = is_obstacle_relationship_safe(rel_ahead, follow_or_plan, debug);
 
   if (ahead_is_safe) {
     return std::make_tuple(true, LaneConstraints {obstacle_ahead.now_speed, rel_ahead.time_to_collision});
@@ -234,7 +266,7 @@ tuple<int, LaneConstraints> prepare_lane_change(
     bool is_safe;
     LaneConstraints constraints;
     std::tie(is_safe, constraints) = validate_lane_change(
-      adj_lane, LANE_CHANGE_BUFFER_S_DURING_PLANNING, closest_obstacle_inds, telemetry, debug);
+      adj_lane, false, closest_obstacle_inds, telemetry, debug);
 
     if (is_safe &&
         constraints.time_to_collision > optimal_adj_constraints.time_to_collision) {
@@ -253,6 +285,7 @@ tuple<int, LaneConstraints> prepare_lane_change(
   * at the present time and, if necessary, in the future.
   * Evaluating the present-time relationship is necessary because an obstacle
   * may cut into self's lane at a closer proximity than the self's future path end.
+  * This does not look behind.
   */
 LaneConstraints follow_obstacle_ahead(
   const int target_lane,
@@ -274,8 +307,7 @@ LaneConstraints follow_obstacle_ahead(
     cout << "following, now:" << endl << now_rel;
   }
 
-  // Skip checking position safety.
-  if (! is_time_to_collision_safe(now_rel.time_to_collision)) {
+  if (! is_obstacle_relationship_safe(now_rel, true, debug)) {
     return LaneConstraints {obstacle.now_speed, now_rel.time_to_collision};
   }
 
@@ -284,8 +316,7 @@ LaneConstraints follow_obstacle_ahead(
     cout << "following, future:" << endl << future_rel;
   }
 
-  // Skip checking position safety.
-  if (! is_time_to_collision_safe(future_rel.time_to_collision)) {
+  if (! is_obstacle_relationship_safe(future_rel, true, debug)) {
     return LaneConstraints {obstacle.now_speed, future_rel.time_to_collision};
   }
 
@@ -332,7 +363,7 @@ FSM iterate_fsm(const FSM fsm, const Telemetry & telemetry, const bool debug) {
     bool is_safe;
     LaneConstraints _;
     std::tie(is_safe, _) = validate_lane_change(
-      fsm.target_lane, LANE_CHANGE_BUFFER_S_DURING_INITIATION, closest_obstacle_inds, telemetry, debug);
+      fsm.target_lane, true, closest_obstacle_inds, telemetry, debug);
 
     if (is_safe) {
       return FSM {INITIATE_LANE_CHANGE, fsm.target_lane, following.target_speed};
