@@ -22,6 +22,11 @@ int lane_index_away(int from_lane_index, double to_d) {
   }
 }
 
+bool lane_change_is_complete(int lane, double d) {
+  double d_gap_remaining = fabs(lane_index_to_d(lane) - d);
+  return d_gap_remaining < LANE_CHANGE_COMPLETION_MARGIN_D;
+}
+
 /**
   * Returns obstacle indexes of {
   *   lane 0 ahead, lane 1 ahead, lane 2 ahead,
@@ -43,13 +48,13 @@ vector<int> find_closest_obstacles(const vector<vector<double> > & obstacles, do
     double s = obstacle[5];
 
     vector<int> relevant_lanes;
-    if (d < LANE_WIDTH + LANE_DETECTION_BUFFER) {
+    if (d < LANE_WIDTH + LANE_DETECTION_BUFFER_D) {
       relevant_lanes.push_back(0);
     }
-    if (LANE_WIDTH - LANE_DETECTION_BUFFER < d && d < LANE_WIDTH * 2 + LANE_DETECTION_BUFFER) {
+    if (LANE_WIDTH - LANE_DETECTION_BUFFER_D < d && d < LANE_WIDTH * 2 + LANE_DETECTION_BUFFER_D) {
       relevant_lanes.push_back(1);
     }
-    if (LANE_WIDTH * 2 - LANE_DETECTION_BUFFER < d) {
+    if (LANE_WIDTH * 2 - LANE_DETECTION_BUFFER_D < d) {
       relevant_lanes.push_back(2);
     }
 
@@ -120,27 +125,26 @@ ObstacleRelationship calc_obstacle_relationship(
   double time_to_collision = -pos_gap / speed_gap;
 
   double abs_pos_gap = fabs(pos_gap);
-  bool is_pos_gap_safe = abs_pos_gap > LANE_CHANGE_BUFFER_S;
 
-  bool is_time_to_collision_safe =
-    time_to_collision < MIN_TIME_TO_COLLISION ||
-    time_to_collision > MAX_TIME_TO_COLLISION;
+  return ObstacleRelationship {abs_pos_gap, time_to_collision};
+}
 
-  return ObstacleRelationship {
-    abs_pos_gap, is_pos_gap_safe, time_to_collision, is_time_to_collision_safe};
+bool is_time_to_collision_safe(double time_to_collision) {
+  return
+    time_to_collision < MIN_UNSAFE_TIME_TO_COLLISION ||
+    time_to_collision > MAX_UNSAFE_TIME_TO_COLLISION;
 }
 
 /**
-  * Returns whether setting the given lane as the target is .... TODO
-  * 1) safe to do, and
-  * 2) advantageous compared to reference time-to-collision.
+  * Returns (whether safe, constraints) if the self is to change into the given lane.
   *
-  * future only ... TODO
-  *
-  * Returns (whether safe, constraints) for the given lane.
+  * Note, Detection of the closest object in each lane should have used a buffer
+  * to include obstacles that are coming in from 2 lanes away. So this function
+  * validates safety wrt obstacles already in the destination lane as well as
+  * obstacles from 2 lanes away.
   */
-tuple<bool, LaneConstraints> estimate_lane_change(
-  const int lane,
+tuple<bool, LaneConstraints> validate_lane_change(
+  const int lane, double position_gap_threshold,
   const vector<int> & closest_obstacle_inds,
   const Telemetry & telemetry,
   const bool debug) {
@@ -153,21 +157,26 @@ tuple<bool, LaneConstraints> estimate_lane_change(
     retrieve_closest_obstacle(lane, false, telemetry.now_obstacles, closest_obstacle_inds);
 
   if (! found_ahead && ! found_behind) {
-    // No one ahead or behind.
     return std::make_tuple(true, LaneConstraints {SPEED_LIMIT, MAX_DOUBLE});
   }
 
   // Determine whether the obstacle behind will allow the self to be in front of it.
   if (found_behind) {
     ObstacleRelationship rel_behind = calc_obstacle_relationship(telemetry, obstacle_behind, true);
-
     if (debug) {
-      cout << "estimate change to lane " << lane << " behind" << endl << rel_behind;
+      cout << "lane " << lane << " behind:" << endl << rel_behind;
     }
 
-    bool behind_is_safe = rel_behind.is_position_gap_safe && rel_behind.is_time_to_collision_safe;
+    bool behind_is_safe =
+      is_time_to_collision_safe(rel_behind.time_to_collision) &&
+      rel_behind.position_gap > position_gap_threshold;
 
     if (! behind_is_safe) {
+      if (debug) {
+        // Pad lines.
+        ObstacleRelationship rel_foo;
+        cout << "lane " << lane << " ahead was not validated:" << endl << rel_foo;
+      }
       LaneConstraints foo;
       return std::make_tuple(false, foo);
     }
@@ -177,19 +186,19 @@ tuple<bool, LaneConstraints> estimate_lane_change(
   // (whether there is one behind or not).
 
   if (! found_ahead) {
-    // No one ahead.
     return std::make_tuple(true, LaneConstraints {SPEED_LIMIT, MAX_DOUBLE});
   }
 
   // At this point in code, there is someone ahead.
 
   ObstacleRelationship rel_ahead = calc_obstacle_relationship(telemetry, obstacle_ahead, true);
-
   if (debug) {
-    cout << "estimate change to lane " << lane << " ahead" << endl << rel_ahead;
+    cout << "lane " << lane << " ahead:" << endl << rel_ahead;
   }
 
-  bool ahead_is_safe = rel_ahead.is_position_gap_safe && rel_ahead.is_time_to_collision_safe;
+  bool ahead_is_safe =
+    is_time_to_collision_safe(rel_ahead.time_to_collision) &&
+    rel_ahead.position_gap > position_gap_threshold;
 
   if (ahead_is_safe) {
     return std::make_tuple(true, LaneConstraints {obstacle_ahead.now_speed, rel_ahead.time_to_collision});
@@ -224,8 +233,8 @@ tuple<int, LaneConstraints> prepare_lane_change(
 
     bool is_safe;
     LaneConstraints constraints;
-    std::tie(is_safe, constraints) = estimate_lane_change(
-      adj_lane, closest_obstacle_inds, telemetry, debug);
+    std::tie(is_safe, constraints) = validate_lane_change(
+      adj_lane, LANE_CHANGE_BUFFER_S_DURING_PLANNING, closest_obstacle_inds, telemetry, debug);
 
     if (is_safe &&
         constraints.time_to_collision > optimal_adj_constraints.time_to_collision) {
@@ -261,24 +270,22 @@ LaneConstraints follow_obstacle_ahead(
   }
 
   ObstacleRelationship now_rel = calc_obstacle_relationship(telemetry, obstacle, false);
-
   if (debug) {
     cout << "following, now:" << endl << now_rel;
   }
 
   // Skip checking position safety.
-  if (! now_rel.is_time_to_collision_safe) {
+  if (! is_time_to_collision_safe(now_rel.time_to_collision)) {
     return LaneConstraints {obstacle.now_speed, now_rel.time_to_collision};
   }
 
   ObstacleRelationship future_rel = calc_obstacle_relationship(telemetry, obstacle, true);
-
   if (debug) {
     cout << "following, future:" << endl << future_rel;
   }
 
   // Skip checking position safety.
-  if (! future_rel.is_time_to_collision_safe) {
+  if (! is_time_to_collision_safe(future_rel.time_to_collision)) {
     return LaneConstraints {obstacle.now_speed, future_rel.time_to_collision};
   }
 
@@ -291,16 +298,10 @@ FSM iterate_fsm(const FSM fsm, const Telemetry & telemetry, const bool debug) {
   vector<int> closest_obstacle_inds = find_closest_obstacles(telemetry.now_obstacles, telemetry.now_s);
 
   // For all FSM states,
-  // 1. adjust the target speed for the current target lane
-  // 1. also get the cost of keeping the current target lane
-  //
-  // Time-to-collision is the cost function.
-  // The less positive the time-to-collision, the worse the cost.
+  // - adjust the target speed for the current target lane
+  // - also get the cost of keeping the current target lane, in the form of time-to-collision.
   LaneConstraints following = follow_obstacle_ahead(
-    fsm.target_lane,
-    closest_obstacle_inds,
-    telemetry,
-    debug);
+    fsm.target_lane, closest_obstacle_inds, telemetry, debug);
 
   if (fsm.state == KEEP_LANE) {
     bool ahead_is_clear = following.time_to_collision == MAX_DOUBLE;
@@ -314,49 +315,42 @@ FSM iterate_fsm(const FSM fsm, const Telemetry & telemetry, const bool debug) {
     std::tie(adj_lane, adj_constraints) = prepare_lane_change(
       fsm.target_lane, closest_obstacle_inds, telemetry, debug);
 
+    // Initiate lane change iff safe and advantageous.
     if (adj_lane != -1 &&
         adj_constraints.time_to_collision > following.time_to_collision) {
-      return FSM {CHANGING_LANE, adj_lane, adj_constraints.target_speed};
+      return FSM {INITIATE_LANE_CHANGE, adj_lane, adj_constraints.target_speed};
     } else {
       return FSM {PLAN_LANE_CHANGE, fsm.target_lane, following.target_speed};
     }
   }
 
-  if (fsm.state == CHANGING_LANE) {
-    double d_error = fabs(lane_index_to_d(fsm.target_lane) - telemetry.future_d);
-    if (d_error < LANE_CHANGE_COMPLETION_MARGIN) {
-      // Changing lane is done.
+  if (fsm.state == INITIATE_LANE_CHANGE) {
+    if (lane_change_is_complete(fsm.target_lane, telemetry.future_d)) {
       return FSM {KEEP_LANE, fsm.target_lane, following.target_speed};
     }
 
+    bool is_safe;
+    LaneConstraints _;
+    std::tie(is_safe, _) = validate_lane_change(
+      fsm.target_lane, LANE_CHANGE_BUFFER_S_DURING_INITIATION, closest_obstacle_inds, telemetry, debug);
 
-    // TODO
-    return FSM {CHANGING_LANE, fsm.target_lane, following.target_speed};
-    // TODO restore below
+    if (is_safe) {
+      return FSM {INITIATE_LANE_CHANGE, fsm.target_lane, following.target_speed};
+    } else {
+      int original_lane = lane_index_away(fsm.target_lane, telemetry.now_d);
 
+      LaneConstraints following_original_lane = follow_obstacle_ahead(
+        original_lane, closest_obstacle_inds, telemetry, debug);
 
-    // // We check for the feasibility of the destination lane as we're moving into it.
-    // // This is necessary because there might be an obstacle behind that's closer
-    // // than expected. I believe this happens when that obstacle either:
-    // // - was in the same lane and accelerated
-    // // - came in from another lane
-    // double _, alt_time_to_collision;
-    // std::tie(_, alt_time_to_collision) = estimate_lane_change(
-    //   fsm.target_lane,
-    //   closest_obstacle_inds,
-    //   telemetry,
-    //   debug);
+      return FSM {ABORT_LANE_CHANGE, original_lane, following_original_lane.target_speed};
+    }
+  }
 
-    // if (alt_time_to_collision < MIN_TIME_TO_COLLISION) {
-    //   if (debug) {
-    //     cout << "abort changing lane !!!" << endl;
-    //   }
-    //   // Pass the current `telemetry.now_d`, rather than the future `end_path_d`.
-    //   int original_target_lane = lane_index_away(fsm.target_lane, telemetry.now_d);
-    //   return FSM {CHANGING_LANE, original_target_lane, following.target_speed};
-    // } else {
-    //   return FSM {CHANGING_LANE, fsm.target_lane, following.target_speed};
-    // }
+  if (fsm.state == ABORT_LANE_CHANGE) {
+    // Commit to the aborting lane change and, do not use safety concern to abort this aborting.
+    FSM_State next_fsm_state = lane_change_is_complete(fsm.target_lane, telemetry.future_d) ?
+      KEEP_LANE : ABORT_LANE_CHANGE;
+    return FSM {next_fsm_state, fsm.target_lane, following.target_speed};
   }
 
   throw; // Remove compiler warning
@@ -398,11 +392,12 @@ tuple<vector<double>, vector<double> > generate_path(
 
   // Add a few more sparse markers in far distance
   // Pick the markers in s,d and convert them to x,y
-  // 30 meters is far ahead enough for a smooth lane change
   // Add more points further away to make the tail end of the curve straight
-  vector<double> future_s_offsets{30, 60, 90};
-  for (unsigned int i = 0; i < future_s_offsets.size(); i++) {
-    double future_s_offset = future_s_offsets[i];
+  double closest_future_s_offset = std::max(
+    PATHGEN_FUTURE_MARKERS_GAP / SPEED_LIMIT * end_path_speed,
+    PATHGEN_FUTURE_MARKERS_GAP_MIN);
+  for (unsigned int i = 0; i < PATHGEN_FUTURE_MARKERS_NUM; i++) {
+    double future_s_offset = closest_future_s_offset + PATHGEN_FUTURE_MARKERS_GAP * i;
 
     vector<double> marker_xy = sd_to_xy(
       telemetry.future_s + future_s_offset,
@@ -443,7 +438,7 @@ tuple<vector<double>, vector<double> > generate_path(
     // and close enough to linearize the curvature.
     // Because s and p coordinates are approximately equal in the short
     // distance, simply pick the closest future s offset.
-    double target_p = future_s_offsets[0];
+    double target_p = closest_future_s_offset;
     double target_q = spliner_pq(target_p);
     double target_dist = sqrt(pow(target_p, 2) + pow(target_q, 2));
     double dist_per_interval = PATH_INTERVAL * end_path_speed / MPS_TO_MPH; // meter

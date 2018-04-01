@@ -7,36 +7,42 @@
 #include <tuple>
 #include <functional>
 
-const double MAX_DOUBLE = std::numeric_limits<double>::max();
+constexpr double MAX_DOUBLE = std::numeric_limits<double>::max();
 
-const double MPS_TO_MPH = 2.236936; // 1 meter/sec equals this much mile/hour
+constexpr double MPS_TO_MPH = 2.236936; // 1 meter/sec equals this much mile/hour
 
-const double SPEED_LIMIT = 49.5; // mph
+constexpr double SPEED_LIMIT = 49.5; // mph
 
-const int NUM_LANES = 3;
-const double LANE_WIDTH = 4; // meter
-// To consider obstacles that are in process of changing lanes, use buffer.
-const double LANE_DETECTION_BUFFER = LANE_WIDTH / 8;
+constexpr int NUM_LANES = 3;
+constexpr double LANE_WIDTH = 4; // meter
+// To consider obstacles that are in process of changing lanes, us this buffer.
+constexpr double LANE_DETECTION_BUFFER_D = LANE_WIDTH / 4;
+// Lane change is considered complete when the d settles within this distance
+// from the new lane center. The whole width is twice this margin.
+const double LANE_CHANGE_COMPLETION_MARGIN_D = LANE_WIDTH / 8;
 
-// Min `s` direction distance required as a precondition for lane change.
-// For safety, buffer behind should be much larger than that ahead.
-// But mathematically this works.
-const double LANE_CHANGE_BUFFER_S = 3; // meter
-
-// Lane change is considered complete when the d settles within this distance from the new lane center.
-const double LANE_CHANGE_COMPLETION_MARGIN = LANE_WIDTH / 40; // 10 cm margin => 20cm width
+// Min distance, ahead and behind, required as a precondition for lane change.
+const double LANE_CHANGE_BUFFER_S_DURING_PLANNING = 4; // meter
+const double LANE_CHANGE_BUFFER_S_DURING_INITIATION = 3; // meter
 
 // The min/max bounds of time-to-collision, inside which it is considered to be dangerous.
-const double MIN_TIME_TO_COLLISION = 0; // sec
-const double MAX_TIME_TO_COLLISION = 1; // sec
+const double MIN_UNSAFE_TIME_TO_COLLISION = 0; // sec
+const double MAX_UNSAFE_TIME_TO_COLLISION = 1; // sec
+
 // DEFAULT_ACCEL == `0.5 / 2.236936`. Then the `0.5` has a unit of `mile/hour/sec`?
 // I don't know if this calculation is meaningful. But it works.
-const double DEFAULT_ACCEL = .224; // meter/sec/sec
+constexpr double DEFAULT_ACCEL = .224; // meter/sec/sec
 
-const double PATH_INTERVAL = 0.02; // sec
-const double OUTPUT_PATH_DURATION = 1; // sec
-// We'll generate this many plus one path points.
+constexpr double PATH_INTERVAL = 0.02; // sec
+constexpr double OUTPUT_PATH_DURATION = 1; // sec
 const int NUM_OUTPUT_PATH_POINTS = ceil(OUTPUT_PATH_DURATION / PATH_INTERVAL);
+
+// Gap between markers to add beyond the existing path.
+constexpr double PATHGEN_FUTURE_MARKERS_NUM = 3;
+// 30 meters is far ahead enough for a smooth lane change at speed of 49.5 mph.
+constexpr double PATHGEN_FUTURE_MARKERS_GAP = 30; // meter
+// At low speeds, including when starting out, use the gap at 15mph.
+constexpr double PATHGEN_FUTURE_MARKERS_GAP_MIN = PATHGEN_FUTURE_MARKERS_GAP / SPEED_LIMIT * 15;
 
 
 struct Telemetry {
@@ -68,7 +74,7 @@ struct Obstacle {
   double now_d;
 };
 
-enum FSM_State {KEEP_LANE, PLAN_LANE_CHANGE, CHANGING_LANE};
+enum FSM_State {KEEP_LANE, PLAN_LANE_CHANGE, INITIATE_LANE_CHANGE, ABORT_LANE_CHANGE};
 
 struct FSM {
   FSM_State state;
@@ -80,7 +86,8 @@ inline std::ostream & operator<<(std::ostream & stream, FSM const & fsm) {
   std::string state_str;
   if (fsm.state == KEEP_LANE) { state_str = "KL "; }
   if (fsm.state == PLAN_LANE_CHANGE) { state_str = "PLC"; }
-  if (fsm.state == CHANGING_LANE) { state_str = "CL "; }
+  if (fsm.state == INITIATE_LANE_CHANGE) { state_str = "ILC"; }
+  if (fsm.state == ABORT_LANE_CHANGE) { state_str = "ALC"; }
 
   stream << "fsm_state " << state_str
     << " target_lane " << fsm.target_lane
@@ -89,7 +96,7 @@ inline std::ostream & operator<<(std::ostream & stream, FSM const & fsm) {
 }
 
 /**
-  * Describes constraints if the self vehicle is to follow some lane.
+  * Describes constraints the self vehicle would encounter if it is to follow some lane.
   *
   * `time_to_collision` should be used as the cost of such decision.
   * The larger the time, the better the cost.
@@ -110,14 +117,12 @@ inline std::ostream & operator<<(std::ostream & stream, LaneConstraints const & 
   */
 struct ObstacleRelationship {
   double position_gap;
-  bool is_position_gap_safe;
   double time_to_collision;
-  bool is_time_to_collision_safe;
 };
 
 inline std::ostream & operator<<(std::ostream & stream, ObstacleRelationship const & rel) { 
-  stream << "pos  " << (rel.is_position_gap_safe ? "" : "! ") << rel.position_gap << std::endl;
-  stream << "time " << (rel.is_time_to_collision_safe ? "" : "! ") << rel.time_to_collision << std::endl;
+  stream << "pos  " << rel.position_gap << std::endl;
+  stream << "time " << rel.time_to_collision << std::endl;
   return stream;
 }
 
